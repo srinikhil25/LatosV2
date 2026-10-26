@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "latos2"
+version = "0.1.0"
+description = "Latos V2: HIOKI thermovoltage measurement analyzer (Milestone 1)"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=2.0",
+    "openpyxl>=3.1",
+    "matplotlib>=3.8",
+    "PySide6>=6.6",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.gui-scripts]
+latos2 = "latos2.app:main"
+
+[tool.setuptools.packages.find]
+include = ["latos2*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

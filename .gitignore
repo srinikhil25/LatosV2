@@ -1,0 +1,28 @@
+@'
+# Python build and cache files
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+
+# Tool caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Measurement data and exported results stay outside the repository
+*.xlsx
+*.xls
+*_latos2_*/
+
+# Editors and OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+'@ | Set-Content -Encoding ascii .gitignore
