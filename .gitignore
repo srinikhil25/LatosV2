@@ -1,4 +1,4 @@
-@'
+
 # Python build and cache files
 __pycache__/
 *.py[cod]
@@ -25,4 +25,6 @@ venv/
 .idea/
 Thumbs.db
 desktop.ini
-'@ | Set-Content -Encoding ascii .gitignore
+
+
+analysis/

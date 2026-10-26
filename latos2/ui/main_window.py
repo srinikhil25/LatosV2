@@ -35,6 +35,7 @@ from latos2.thermovoltage import (
 )
 from latos2.ui import style
 from latos2.ui.experiment_view import ExperimentView
+from latos2.ui.optimization_view import OptimizationView
 from latos2.ui.panels import DataExplorer, PlotWorkspace, PropertiesPanel, WorkflowBar
 from latos2.units import UnitError, quantization_step, voltage_factor_to_mv
 
@@ -89,11 +90,11 @@ class MainWindow(QMainWindow):
         self.new_experiment_action = QAction(
             icons.standardIcon(QStyle.StandardPixmap.SP_FileIcon), "New experiment", self
         )
-        self.new_experiment_action.triggered.connect(lambda: self._experiment_mode() and view.new_experiment())
+        self.new_experiment_action.triggered.connect(lambda: self._replace_experiment(view.new_experiment))
         self.open_experiment_action = QAction(
             icons.standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon), "Open experiment…", self
         )
-        self.open_experiment_action.triggered.connect(lambda: self._experiment_mode() and view.open_experiment())
+        self.open_experiment_action.triggered.connect(lambda: self._replace_experiment(view.open_experiment))
         self.save_experiment_action = QAction(
             icons.standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton), "Save experiment", self
         )
@@ -105,11 +106,17 @@ class MainWindow(QMainWindow):
         self.mode_group = QActionGroup(self)
         self.analyzer_mode_action = QAction("HIOKI Analyzer", self.mode_group)
         self.experiment_mode_action = QAction("Experiment", self.mode_group)
-        for action, mode in ((self.analyzer_mode_action, "analyzer"), (self.experiment_mode_action, "experiment")):
+        self.optimization_mode_action = QAction("Optimization", self.mode_group)
+        for action, mode in (
+            (self.analyzer_mode_action, "analyzer"),
+            (self.experiment_mode_action, "experiment"),
+            (self.optimization_mode_action, "optimization"),
+        ):
             action.setCheckable(True)
             action.triggered.connect(lambda _checked=False, m=mode: self.set_mode(m))
         self.analyzer_mode_action.setToolTip("Analyse one HIOKI recording")
         self.experiment_mode_action.setToolTip("Define the experiment and collect its specimens and measurements")
+        self.optimization_mode_action.setToolTip("Fit a Gaussian process to the experiment and review the next condition")
 
         file_menu = self.menuBar().addMenu("&File")
         file_menu.addAction(self.open_action)
@@ -122,6 +129,7 @@ class MainWindow(QMainWindow):
         view_menu = self.menuBar().addMenu("&View")
         view_menu.addAction(self.analyzer_mode_action)
         view_menu.addAction(self.experiment_mode_action)
+        view_menu.addAction(self.optimization_mode_action)
         self.menuBar().addMenu("&Help").addAction(about_action)
 
         def bar(name: str):
@@ -133,6 +141,7 @@ class MainWindow(QMainWindow):
         mode_bar = bar("Workspace")
         mode_bar.addAction(self.analyzer_mode_action)
         mode_bar.addAction(self.experiment_mode_action)
+        mode_bar.addAction(self.optimization_mode_action)
         self.analyzer_bar = bar("Analyzer")
         self.analyzer_bar.addAction(self.open_action)
         self.analyzer_bar.addAction(self.export_action)
@@ -162,10 +171,14 @@ class MainWindow(QMainWindow):
         layout.addWidget(splitter, 1)
         self.pages = QStackedWidget()
         self.pages.addWidget(analyzer)
+        self.optimization_view = OptimizationView(lambda: self.experiment_view.experiment)
         self.pages.addWidget(self.experiment_view)
+        self.pages.addWidget(self.optimization_view)
         self.setCentralWidget(self.pages)
         view.titleChanged.connect(lambda _title: self._update_title())
         view.statusMessage.connect(lambda text: self.statusBar().showMessage(text, 8000))
+        self.optimization_view.changed.connect(view.mark_unsaved)
+        self.optimization_view.statusMessage.connect(lambda text: self.statusBar().showMessage(text, 8000))
         self.coordinates = QLabel("")
         self.coordinates.setMinimumWidth(190)
         self.statusBar().addPermanentWidget(self.coordinates)
@@ -202,27 +215,37 @@ class MainWindow(QMainWindow):
 
     # -- workspaces ---------------------------------------------------------
 
+    MODES = ("analyzer", "experiment", "optimization")
+
     def set_mode(self, mode: str) -> None:
-        """Show the HIOKI Analyzer ("analyzer") or the Experiment workspace ("experiment")."""
-        experiment = mode == "experiment"
-        self.pages.setCurrentIndex(1 if experiment else 0)
-        (self.experiment_mode_action if experiment else self.analyzer_mode_action).setChecked(True)
-        self.analyzer_bar.setVisible(not experiment)
-        self.experiment_bar.setVisible(experiment)
-        self.coordinates.setVisible(not experiment)
-        self.export_link.setVisible(not experiment)
+        """Show the HIOKI Analyzer, the Experiment or the Optimization workspace."""
+        index = self.MODES.index(mode)
+        self.pages.setCurrentIndex(index)
+        (self.analyzer_mode_action, self.experiment_mode_action, self.optimization_mode_action)[index].setChecked(True)
+        self.analyzer_bar.setVisible(index == 0)
+        self.experiment_bar.setVisible(index > 0)
+        self.coordinates.setVisible(index == 0)
+        self.export_link.setVisible(index == 0)
         self.statusBar().clearMessage()
-        if experiment:
+        if index == 1:
             self.experiment_view.refresh_current()
+        elif index == 2:
+            self.optimization_view.refresh()
         self._update_title()
 
-    def _experiment_mode(self) -> bool:
+    def _replace_experiment(self, action) -> None:
+        """New or open an experiment, staying in the Optimization workspace if that is where we are."""
+        mode = "optimization" if self.pages.currentIndex() == 2 else "experiment"
         self.set_mode("experiment")
-        return True
+        action()
+        self.set_mode(mode)
 
     def _update_title(self) -> None:
-        if self.pages.currentIndex() == 1:
+        index = self.pages.currentIndex()
+        if index == 1:
             self.setWindowTitle(f"Latos V2 — Experiment: {self.experiment_view.title()}")
+        elif index == 2:
+            self.setWindowTitle(f"Latos V2 — Optimization: {self.experiment_view.title()}")
         else:
             self.setWindowTitle("Latos V2 — HIOKI Measurement Analyzer")
 

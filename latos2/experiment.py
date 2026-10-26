@@ -40,6 +40,7 @@ __all__ = [
     "Measurement",
     "Message",
     "Mixture",
+    "OptimizationSettings",
     "OutputDefinition",
     "Specimen",
     "attach",
@@ -211,6 +212,40 @@ class Specimen:
 
 
 @dataclass
+class OptimizationSettings:
+    """How the researcher has set up the search for the next experiment.
+
+    Attributes:
+        output: The output to optimize; its goal is the output's objective.
+        fraction_bounds: Search domain of each mixture component's mass
+            fraction, [lower, upper]; a component not listed is free in [0, 1].
+        include_outside: Fit observations that lie outside the search domain
+            too. Off by default: the domain is the researcher's decision.
+        acquisition: ``ei`` (expected improvement) or ``explore`` (largest
+            model uncertainty).
+        additional_noise: σ_add in the output's unit, added in quadrature to
+            every observation's measured SEM.
+        min_separation: Smallest allowed distance from a measured condition,
+            as a fraction of each input's search range.
+        allow_replicates: Allow recommending a measured condition again.
+        seed: Seed of the model fit and of candidate sampling.
+        preparation_total_g: Total mass to prepare the recommended specimen in.
+        balance_resolution_g: Resolution the masses are rounded to.
+    """
+
+    output: str | None = None
+    fraction_bounds: dict[str, list[float]] = field(default_factory=dict)
+    include_outside: bool = False
+    acquisition: str = "ei"
+    additional_noise: float = 0.0
+    min_separation: float = 0.05
+    allow_replicates: bool = False
+    seed: int = 0
+    preparation_total_g: float | None = None
+    balance_resolution_g: float = 0.0001
+
+
+@dataclass
 class Experiment:
     """An optimization problem and the observations made for it."""
 
@@ -220,6 +255,7 @@ class Experiment:
     mixture: Mixture | None = None
     outputs: list[OutputDefinition] = field(default_factory=list)
     specimens: list[Specimen] = field(default_factory=list)
+    optimization: OptimizationSettings | None = None
 
     def output(self, name: str) -> OutputDefinition | None:
         return next((o for o in self.outputs if o.name == name), None)

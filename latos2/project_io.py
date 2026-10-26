@@ -20,6 +20,7 @@ from latos2.experiment import (
     InputVariable,
     Measurement,
     Mixture,
+    OptimizationSettings,
     OutputDefinition,
     Specimen,
 )
@@ -79,6 +80,8 @@ def load_experiment(path: str | Path) -> Experiment:
     try:
         e = data["experiment"]
         mixture = e["mixture"]
+        # Absent from files written before the optimizer existed.
+        optimization = e.get("optimization")
         return Experiment(
             name=e["name"],
             description=e["description"],
@@ -89,6 +92,7 @@ def load_experiment(path: str | Path) -> Experiment:
                 Specimen(**{**s, "measurements": [Measurement(**m) for m in s["measurements"]]})
                 for s in e["specimens"]
             ],
+            optimization=OptimizationSettings(**optimization) if optimization is not None else None,
         )
     except (KeyError, TypeError) as exc:
         raise ProjectError(f"{path.name} is damaged: {exc}") from exc

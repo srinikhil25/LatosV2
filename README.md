@@ -25,19 +25,20 @@ Latos is not specific to ionic liquids, MXenes, thermoelectrics or any fixed set
 of input variables.
 
 **Current status:** Milestone 1 (HIOKI Measurement Analyzer) and Milestone 2
-(experiment definition and observation management) are complete. Gaussian-process
-modeling and Bayesian optimization are next; recommendations, prospective
-validation and other instrument modules are planned. None of these is available
-yet. Latos V2 is a research prototype, not
-a validated general-purpose optimization product.
+(experiment definition and observation management) are complete. Milestone 3
+(Gaussian-process modeling and Bayesian optimization) is implemented and awaiting
+researcher review; it produces provisional recommendations only. Recommendation
+freezing, prospective validation and other instrument modules are planned and not
+yet available. Latos V2 is a research prototype, not a validated general-purpose
+optimization product.
 
 ## Applications
 
 The initial research applications are:
 
-- **Ionic-liquid-soaked cotton:** time-resolved thermovoltage analysis, followed
-  by planned composition optimization and prospective measurement. This is the
-  first implementation and optimization demonstration.
+- **Ionic-liquid-soaked cotton:** time-resolved thermovoltage analysis and
+  composition optimization, followed by planned prospective measurement. This is
+  the first implementation and optimization demonstration.
 - **MXene materials:** planned quantitative analysis of XRD, XPS, Raman, PPMS and
   microscopy measurements, followed by cross-technique comparisons where
   scientifically justified.
@@ -88,6 +89,37 @@ graphs → Export results.
 Constraints are currently limited to input ranges, allowed levels and a fixed
 total mass. Constraints that relate several inputs are not yet supported.
 
+### Optimization workspace (M3)
+
+- **Surrogate model:** a Gaussian process (Matérn 5/2, one length-scale per
+  input, inputs scaled to the search range) fitted to one output of the
+  experiment, one observation per independent specimen. Each specimen's
+  within-specimen SEM is its observation noise, optionally with an additional
+  noise level set by the researcher. The fit uses a recorded random seed.
+- **Design space:** the experiment's continuous and discrete inputs and, for a
+  mixture of N components, N − 1 mass fractions with the last as the balance. The
+  researcher sets the search domain; specimens outside it, or without a usable
+  response, are listed with the reason they are not in the fit.
+- **Acquisition:** expected improvement for maximize or minimize goals, expected
+  gain in closeness for a target value, or the largest model uncertainty for
+  exploration. Candidates respect bounds, mixture constraints, allowed levels and a
+  minimum separation from measured conditions, unless replicates are allowed.
+- **Recommendation:** one provisional candidate with its predicted response,
+  model standard deviation and an illustrative model-based 95 % interval, plus the
+  weighed masses for a total mass the researcher enters, checked after rounding to
+  the balance resolution. It is labelled *Provisional recommendation, awaiting
+  researcher review* and is not frozen or scored.
+- **Small-data evaluation:** leave-one-out predictions with hyperparameters
+  refitted in every fold, the number inside the nominal 95 % interval, a
+  comparison across additional-noise levels, and a space-filling baseline
+  candidate for comparison of decisions.
+- Surrogate and acquisition graphs are drawn for one optimization variable;
+  with more, results are reported in tables. Categorical inputs and total mass as
+  a design variable are not yet supported.
+
+The optimization settings are saved in the experiment file. The fitted model is
+not saved; refitting with the same data, settings and seed reproduces it.
+
 ## Getting started
 
 On Windows, from the Latos V2 project directory with the project's virtual
@@ -103,6 +135,8 @@ environment and dependencies installed:
 2. In **Experiment**, define the mixture, inputs and outputs on the Definition
    tab, add specimens, and use **Attach HIOKI analysis…** to attach the analysis
    shown in the analyzer to a specimen.
+3. In **Optimization**, choose the output, goal and search domain, then use
+   **Fit model and recommend**. Enter a total mass to obtain the masses to weigh.
 
 For dependency details, see `pyproject.toml`. Latos is not yet packaged as a
 standalone installer.
@@ -145,6 +179,13 @@ IL2 = [HMIM][TFSI]), with forward leads as the primary session:
 These are reproduced analysis results under specific recording conditions, not
 evidence of universal model accuracy or steady-state material performance.
 
+**First optimization demonstration.** Maximizing the signed whole-cycle S_app
+over x_IL1 from 0.2396 to 1 (four specimens; pure IL2 lies outside this domain),
+with SEM-only noise and seed 0, the provisional candidate is x_IL1 = 0.6719
+(predicted +2.204 ± 0.125 mV/K, model SD). The fitted length-scale is at its lower
+bound, and two of four leave-one-out predictions fall inside the nominal 95 %
+interval. This candidate has not been prepared or measured.
+
 ## Data integrity and exports
 
 - Original instrument files are opened read-only and identified by SHA-256.
@@ -164,7 +205,7 @@ evidence of universal model accuracy or steady-state material performance.
 |---|---|---|
 | M1 | HIOKI measurement analysis and scientific desktop UI | **Complete** |
 | M2 | Researcher-defined experiments, mixtures, specimen/measurement relationships, observation management | **Complete** |
-| M3 | Gaussian-process modeling, uncertainty display and Bayesian acquisition | Next |
+| M3 | Gaussian-process modeling, uncertainty display and Bayesian acquisition | **Implemented**, awaiting review |
 | M4 | Laboratory-ready next-experiment instructions, frozen predictions and prospective scoring | Planned |
 | M5 | MXene instrument analysis and evidence-linked multitechnique comparisons | Planned |
 
@@ -173,9 +214,9 @@ described as available only after it has been implemented and tested.
 
 ## Technology and development approach
 
-Python, PySide6, NumPy, openpyxl and Matplotlib. Future numerical components will
-use established scientific libraries rather than new implementations of
-foundational algorithms. Latos runs locally, without a cloud service, a separate
+Python, PySide6, NumPy, SciPy, scikit-learn, openpyxl and Matplotlib. Numerical
+components use established scientific libraries rather than new implementations
+of foundational algorithms. Latos runs locally, without a cloud service, a separate
 backend server or a language model.
 
 The project prioritizes scientific usefulness, transparent limitations and a

@@ -5,13 +5,15 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "latos2"
 version = "0.1.0"
-description = "Latos V2: HIOKI thermovoltage measurement analyzer (Milestone 1)"
+description = "Latos V2: a scientific workbench for experimental materials informatics"
 requires-python = ">=3.11"
 dependencies = [
     "numpy>=2.0",
     "openpyxl>=3.1",
     "matplotlib>=3.8",
     "PySide6>=6.6",
+    "scipy>=1.11",
+    "scikit-learn>=1.5",
 ]
 
 [project.optional-dependencies]

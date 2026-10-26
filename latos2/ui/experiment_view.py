@@ -547,6 +547,11 @@ class ExperimentView(QWidget):
 
     # -- public operations --------------------------------------------------
 
+    def mark_unsaved(self) -> None:
+        """Record a change made in another workspace, such as optimization settings."""
+        self.dirty = True
+        self.refresh_all()
+
     def title(self) -> str:
         return self.experiment.name + (" *" if self.dirty else "")
 
