@@ -46,8 +46,8 @@ apart are not independent.
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from itertools import pairwise
 
 import numpy as np
@@ -75,6 +75,7 @@ __all__ = [
     "fit_cycle",
     "fit_line",
     "reduce_cycles",
+    "trace_windows",
     "windows_from_boundaries",
 ]
 
@@ -254,11 +255,16 @@ def windows_from_boundaries(boundaries: Sequence[float]) -> tuple[CycleWindow, .
     )
 
 
-def event_boundaries(numbers: Sequence[int], times_s: Sequence[float]) -> list[float]:
+def event_boundaries(
+    numbers: Sequence[int], times_s: Sequence[float], recording_end_s: float | None = None
+) -> list[float]:
     """The switching times given by a run's event marks.
 
-    The marks must be numbered 1, 2, 3, … in the order they were pressed, and
-    there must be an odd number of them: two per cycle and one for the end.
+    The marks must be numbered 1, 2, 3, … in the order they were pressed. Odd
+    marks switch the drive on and even marks switch it off. With an odd count
+    the last mark ends the run. With an even count the last mark switches the
+    drive off; when `recording_end_s` (the final recorded sample) is given, the
+    final cooling period ends there. No closing mark is invented.
     """
     if len(numbers) != len(times_s):
         raise ValueError("numbers and times_s must have the same length")
@@ -272,13 +278,40 @@ def event_boundaries(numbers: Sequence[int], times_s: Sequence[float]) -> list[f
             "so a mark is missing, repeated or out of sequence"
         )
     count = len(numbers)
+    times = [float(t) for t in times_s]
+    if count % 2 == 0 and recording_end_s is not None:
+        if not float(recording_end_s) > times[-1]:
+            raise CycleBoundaryError(
+                "the recording ends at its last event mark, so the final cooling period "
+                "holds no samples"
+            )
+        return [*times, float(recording_end_s)]
     if count < _MIN_BOUNDARIES or count % 2 == 0:
         raise CycleBoundaryError(
             f"{count} event mark(s) cannot describe whole cycles: each cycle needs a "
             "switch-on mark and a switch-off mark, and the run needs one end mark, so the "
             f"count must be odd and at least {_MIN_BOUNDARIES}"
         )
-    return [float(t) for t in times_s]
+    return times
+
+
+def trace_windows(trace: LoggerTrace) -> tuple[tuple[CycleWindow, ...], str]:
+    """The cycles a recording's event marks describe, and what ended its run.
+
+    With an even number of marks the final cooling period runs to the final
+    recorded sample (decision D2 of 2026-10-26).
+    """
+    if not trace.has_event_column:
+        raise CycleBoundaryError("the recording has no Event column")
+    numbers = [e.number for e in trace.events]
+    boundaries = event_boundaries(
+        numbers, [e.time_s for e in trace.events], recording_end_s=float(trace.time_s[-1])
+    )
+    if len(numbers) % 2 == 1:
+        end_of_run = f"event mark {numbers[-1]}"
+    else:
+        end_of_run = f"the final recorded sample, {trace.time_s[-1]:.1f} s (no closing event mark)"
+    return windows_from_boundaries(boundaries), end_of_run
 
 
 def _direction(delta_t: np.ndarray) -> float:
@@ -401,9 +434,14 @@ class Analysis:
         voltage_recorded_mv: V(+) − V(−) as logged, in mV.
         voltage_oriented_mv: σ·V_rec, in mV.
         cycles: One fit per event-marked cycle.
-        accepted: Indices (1-based) of the cycles without problems.
+        accepted: Indices (1-based) of the cycles without problems that the
+            researcher did not exclude.
         reductions: Mean and SEM per kind over the accepted cycles, or None
             when no cycle was accepted.
+        excluded: Cycles the researcher excluded, with the reason. They are
+            fitted and shown, but left out of every reduction.
+        end_of_run: What ended the last cycle: an event mark or the final
+            recorded sample.
     """
 
     trace: LoggerTrace
@@ -423,17 +461,30 @@ class Analysis:
     cycles: tuple[CycleFit, ...]
     accepted: tuple[int, ...]
     reductions: dict[str, CycleReduction] | None
+    excluded: dict[int, str] = field(default_factory=dict)
+    end_of_run: str = ""
 
     @property
     def problems(self) -> tuple[str, ...]:
         return tuple(p for cycle in self.cycles for p in cycle.problems)
 
 
-def analyze(trace: LoggerTrace, roles: ChannelRoles, wiring_sign: int) -> Analysis:
+def analyze(
+    trace: LoggerTrace,
+    roles: ChannelRoles,
+    wiring_sign: int,
+    excluded: Mapping[int, str] | None = None,
+) -> Analysis:
     """Analyse one recording with an explicit channel assignment and wiring.
 
+    Args:
+        excluded: Cycles the researcher excludes from the specimen value, by
+            index, with the reason (for example an initial test cycle in the
+            lab record). Never applied automatically.
+
     Raises:
-        ValueError: If a channel is assigned twice or `wiring_sign` is not ±1.
+        ValueError: If a channel is assigned twice, `wiring_sign` is not ±1 or
+            an excluded cycle does not exist.
         KeyError: If an assigned channel was not recorded.
         UnitError: If a channel's unit is not accepted.
         CycleBoundaryError: If the event marks do not describe whole cycles.
@@ -452,22 +503,21 @@ def analyze(trace: LoggerTrace, roles: ChannelRoles, wiring_sign: int) -> Analys
             "ΔT needs both in the same unit"
         )
     factor = voltage_factor_to_mv(voltage.unit)
-    if not trace.has_event_column:
-        raise CycleBoundaryError("the recording has no Event column")
-    boundaries = event_boundaries(
-        [e.number for e in trace.events], [e.time_s for e in trace.events]
-    )
-    windows = windows_from_boundaries(boundaries)
+    windows, end_of_run = trace_windows(trace)
+    reasons = {int(k): (str(v).strip() or "Excluded by researcher") for k, v in (excluded or {}).items()}
+    missing = sorted(set(reasons) - {w.index for w in windows})
+    if missing:
+        raise ValueError(f"cycle {missing[0]} cannot be excluded: the recording has {len(windows)} cycles")
 
     recorded_mv = voltage.values * factor
     cycles = tuple(
         fit_cycle(trace.time_s, cold.values, hot.values, recorded_mv, w, wiring_sign=wiring_sign)
         for w in windows
     )
-    accepted = tuple(c.window.index for c in cycles if not c.problems)
+    accepted = tuple(c.window.index for c in cycles if not c.problems and c.window.index not in reasons)
     reductions = (
         {
-            kind: reduce_cycles([c.fit(kind).slope for c in cycles if not c.problems])
+            kind: reduce_cycles([c.fit(kind).slope for c in cycles if c.window.index in accepted])
             for kind in KINDS
         }
         if accepted
@@ -491,4 +541,6 @@ def analyze(trace: LoggerTrace, roles: ChannelRoles, wiring_sign: int) -> Analys
         cycles=cycles,
         accepted=accepted,
         reductions=reductions,
+        excluded=reasons,
+        end_of_run=end_of_run,
     )

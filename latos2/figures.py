@@ -25,8 +25,7 @@ from latos2.thermovoltage import (
     ChannelRoles,
     CycleBoundaryError,
     CycleWindow,
-    event_boundaries,
-    windows_from_boundaries,
+    trace_windows,
 )
 from latos2.units import voltage_factor_to_mv
 
@@ -82,9 +81,7 @@ _DELTA_T_LABEL = r"$\Delta T = T_\mathrm{hot} - T_\mathrm{cold}$ (K)"
 
 def _windows(trace: LoggerTrace) -> tuple[CycleWindow, ...]:
     try:
-        return windows_from_boundaries(
-            event_boundaries([e.number for e in trace.events], [e.time_s for e in trace.events])
-        )
+        return trace_windows(trace)[0]
     except CycleBoundaryError:
         return ()
 
@@ -225,8 +222,11 @@ def draw_voltage_vs_delta_t(
                 path_effects=_HALO,
                 zorder=3,
             )
-        title = f"Cycle {w.index}" + ("  (rejected)" if fitted.problems else "")
-        ax.set_title(title)
+        if w.index in a.excluded:
+            title = f"Cycle {w.index}  (excluded: {a.excluded[w.index]})"
+        else:
+            title = f"Cycle {w.index}" + ("  (rejected)" if fitted.problems else "")
+        ax.set_title(title, color=MUTED if w.index not in a.accepted else COMBINED_COLOR)
         ax.set_xlabel(_DELTA_T_LABEL)
     side = "cold" if a.wiring_sign > 0 else "hot"
     axes[0].set_ylabel(
@@ -261,7 +261,7 @@ def draw_coefficients(fig: Figure, analysis: Analysis, cycle: int | None = None)
                 "o",
                 ms=7,
                 color=KIND_COLORS[kind],
-                mfc="none" if c.problems else KIND_COLORS[kind],
+                mfc=KIND_COLORS[kind] if c.window.index in a.accepted else "white",
                 alpha=0.35 if cycle is not None and c.window.index != cycle else 1.0,
                 zorder=3,
             )
@@ -286,5 +286,9 @@ def draw_coefficients(fig: Figure, analysis: Analysis, cycle: int | None = None)
         Line2D([], [], color=KIND_COLORS[kind], marker="o", ls="none", ms=7, label=KIND_LABELS[kind])
         for kind in KINDS
     ]
-    fig.legend(handles=handles, loc="outside upper center", ncols=3)
+    if len(a.accepted) < n:
+        handles.append(
+            Line2D([], [], color=MUTED, marker="o", mfc="white", ls="none", ms=7, label="Not in mean (excluded or rejected)")
+        )
+    fig.legend(handles=handles, loc="outside upper center", ncols=_legend_columns(fig, len(handles)))
     fig.supxlabel(FOOTNOTE, fontsize=7.5, color=MUTED)

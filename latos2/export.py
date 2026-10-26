@@ -31,7 +31,7 @@ from latos2.thermovoltage import (
     Analysis,
 )
 
-__all__ = ["ExportError", "export_analysis"]
+__all__ = ["ExportError", "analysis_record", "export_analysis"]
 
 _PNG_DPI = 300
 
@@ -142,7 +142,11 @@ def _write_cycles_csv(a: Analysis, path: Path) -> Path:
             for kind in KINDS:
                 fit = c.fit(kind)
                 row += [_cell(fit.slope), _cell(fit.intercept), _cell(fit.r_squared), _cell(fit.slope_stderr)]
-            row += ["yes" if not c.problems else "no", " | ".join(c.problems)]
+            if w.index in a.excluded:
+                accepted = f"excluded: {a.excluded[w.index]}"
+            else:
+                accepted = "yes" if w.index in a.accepted else "no"
+            row += [accepted, " | ".join(c.problems)]
             writer.writerow(row)
     return path
 
@@ -175,6 +179,18 @@ def _write_summary_csv(a: Analysis, path: Path) -> Path:
 
 
 def _write_json(a: Analysis, path: Path, sha_at_export: str) -> Path:
+    record = analysis_record(a, sha_at_export)
+    path.write_text(json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def analysis_record(a: Analysis, sha_at_export: str) -> dict:
+    """The provenance record of an analysis: source, declarations, units, cycles, summary.
+
+    The same record is written to `*_analysis.json` and attached to a specimen
+    in an experiment, so a specimen carries exactly the values the analyzer
+    produced.
+    """
     t = a.trace
     record = {
         "software": {"name": "latos2", "version": latos2.__version__, "python": platform.python_version()},
@@ -197,6 +213,8 @@ def _write_json(a: Analysis, path: Path, sha_at_export: str) -> Path:
             {"number": e.number, "time_s": e.time_s, "sheet_row": e.sheet_row, "timestamp": e.timestamp}
             for e in t.events
         ],
+        "end_of_run": a.end_of_run,
+        "excluded_cycles": {str(index): reason for index, reason in sorted(a.excluded.items())},
         "declarations": {
             "hot_channel": a.roles.hot,
             "cold_channel": a.roles.cold,
@@ -237,7 +255,8 @@ def _write_json(a: Analysis, path: Path, sha_at_export: str) -> Path:
                 "dT_min_K": c.delta_t_min_k,
                 "dT_max_K": c.delta_t_max_k,
                 "mean_electrode_temperature": c.mean_temperature,
-                "accepted": not c.problems,
+                "accepted": c.window.index in a.accepted,
+                "excluded_reason": a.excluded.get(c.window.index),
                 "problems": list(c.problems),
                 **{
                     kind: {
@@ -268,5 +287,4 @@ def _write_json(a: Analysis, path: Path, sha_at_export: str) -> Path:
             for kind in KINDS
         },
     }
-    path.write_text(json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8")
-    return path
+    return record

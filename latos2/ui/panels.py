@@ -11,6 +11,7 @@ from PySide6.QtGui import QColor, QFont, QIcon, QPixmap, QTextOption
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
+    QCheckBox,
     QComboBox,
     QFormLayout,
     QFrame,
@@ -18,6 +19,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QPlainTextEdit,
     QPushButton,
     QRadioButton,
@@ -36,7 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 from latos2.hioki_reader import LoggerTrace
-from latos2.thermovoltage import KINDS, UNIT, WIRING, Analysis, CycleWindow
+from latos2.thermovoltage import KINDS, UNIT, WIRING, Analysis, CycleBoundaryError, CycleWindow, trace_windows
 from latos2.ui import style
 
 WARNING_TEXT = (
@@ -255,12 +257,17 @@ class DataExplorer(QWidget):
         self.tree.show()
         self.info.show()
 
-    def mark_rejected(self, rejected: set[int]) -> None:
-        for (cycle, segment), item in self._items.items():
+    def mark_cycles(self, states: dict[int, str]) -> None:
+        """Label cycles left out of the specimen value: "excluded" or "rejected"."""
+        for (cycle, segment), item in getattr(self, "_items", {}).items():
             if cycle is not None and segment is None:
-                bad = cycle in rejected
-                item.setText(0, f"Cycle {cycle}" + ("  (rejected)" if bad else ""))
-                item.setForeground(0, QColor(style.ERROR if bad else style.TEXT))
+                state = states.get(cycle)
+                item.setText(0, f"Cycle {cycle}" + (f"  ({state})" if state else ""))
+                color = {"rejected": style.ERROR, "excluded": style.MUTED}.get(state, style.TEXT)
+                item.setForeground(0, QColor(color))
+                font = QFont(item.font(0))
+                font.setItalic(state == "excluded")
+                item.setFont(0, font)
 
     def select(self, cycle: int | None, segment: str | None) -> None:
         item = getattr(self, "_items", {}).get((cycle, segment))
@@ -488,6 +495,21 @@ class PropertiesPanel(QWidget):
         bold.setBold(True)
         self.selection_label.setFont(bold)
         layout.addWidget(self.selection_label)
+        # Shown only while one cycle is selected.
+        self.exclusion_box = QWidget()
+        exclusion = QHBoxLayout(self.exclusion_box)
+        exclusion.setContentsMargins(0, 0, 0, 0)
+        self.exclude_check = QCheckBox("Exclude from specimen value")
+        self.exclude_check.setToolTip(
+            "Leave this cycle out of the mean, SD and SEM, for example an initial test cycle "
+            "recorded in the lab notebook. The cycle stays visible and in the exports."
+        )
+        self.exclude_reason = QLineEdit()
+        self.exclude_reason.setPlaceholderText("Reason, e.g. Initial test cycle")
+        exclusion.addWidget(self.exclude_check)
+        exclusion.addWidget(self.exclude_reason, 1)
+        self.exclusion_box.hide()
+        layout.addWidget(self.exclusion_box)
         grid = QGridLayout()
         grid.setHorizontalSpacing(10)
         grid.setVerticalSpacing(3)
@@ -590,6 +612,7 @@ class PropertiesPanel(QWidget):
 
         events = trace.events
         n = len(events)
+        recording_end = float(trace.time_s[-1])
         self.events_table.setRowCount(n)
         for row, e in enumerate(events):
             if e.number == n and n % 2 == 1:
@@ -598,7 +621,13 @@ class PropertiesPanel(QWidget):
                 meaning = f"Heating on · cycle {(e.number + 1) // 2}"
             else:
                 meaning = f"Heating off · cycle {e.number // 2}"
-            phase = f"{events[row + 1].time_s - e.time_s:.1f}" if row + 1 < n else "—"
+            if row + 1 < n:
+                phase = f"{events[row + 1].time_s - e.time_s:.1f}"
+            elif n % 2 == 0:
+                # The final cooling period runs to the last recorded sample.
+                phase = f"{recording_end - e.time_s:.1f}"
+            else:
+                phase = "—"
             for col, text in enumerate([str(e.number), f"{e.time_s:.1f}", meaning, phase]):
                 item = QTableWidgetItem(text)
                 if col != 2:
@@ -606,12 +635,15 @@ class PropertiesPanel(QWidget):
                 item.setToolTip(f"Sheet row {e.sheet_row}, logged {e.timestamp}")
                 self.events_table.setItem(row, col, item)
         _fit_table_height(self.events_table)
-        if not trace.has_event_column:
-            self.events_note.setText("This recording has no Event column.")
-        elif n >= 3 and n % 2 == 1 and [e.number for e in events] == list(range(1, n + 1)):
-            self.events_note.setText(f"{n} marks → {n // 2} heating/cooling cycles. Phase = time to the next mark.")
+        try:
+            windows, end_of_run = trace_windows(trace)
+        except CycleBoundaryError as exc:
+            self.events_note.setText(f"{n} marks: {exc}.")
         else:
-            self.events_note.setText(f"{n} marks; they do not describe whole cycles.")
+            self.events_note.setText(
+                f"{n} marks → {len(windows)} heating/cooling cycles; the run ends at "
+                f"{end_of_run}. Phase = time to the next mark or to the end of the run."
+            )
 
     def show_conversion(self, text: str) -> None:
         self.info_values["Conversion"].setText(text)
@@ -619,6 +651,7 @@ class PropertiesPanel(QWidget):
     def clear_results(self) -> None:
         self.selection_label.setText("")
         self.selection_label.hide()
+        self.exclusion_box.hide()
         for name, value, extra in self.headline.values():
             value.setText("—")
             extra.setText("")
@@ -630,8 +663,9 @@ class PropertiesPanel(QWidget):
     def show_results(self, a: Analysis) -> None:
         rows: list[tuple[str, list[str]]] = []
         for c in a.cycles:
-            mark = "" if not c.problems else " ✕"
-            rows.append((f"Cycle {c.window.index}{mark}", [_fmt(c.fit(k).slope) for k in KINDS]))
+            index = c.window.index
+            mark = " (excl.)" if index in a.excluded else (" ✕" if c.problems else "")
+            rows.append((f"Cycle {index}{mark}", [_fmt(c.fit(k).slope) for k in KINDS]))
         if a.reductions is not None:
             r = a.reductions
             rows.append(("Mean", [_fmt(r[k].mean) for k in KINDS]))
@@ -641,19 +675,26 @@ class PropertiesPanel(QWidget):
         table.setRowCount(len(rows))
         table.setVerticalHeaderLabels([label for label, _ in rows])
         for row, (_, cells) in enumerate(rows):
+            left_out = row < len(a.cycles) and a.cycles[row].window.index not in a.accepted
             for col, text in enumerate(cells):
                 item = QTableWidgetItem(text)
                 item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                if left_out:
+                    item.setForeground(QColor(style.MUTED))
                 table.setItem(row, col, item)
         _fit_table_height(table)
         k = len(a.accepted)
-        self.table_caption.setText(
-            f"Per cycle ({UNIT})" + ("" if k == len(a.cycles) else "; ✕ = rejected cycle")
-        )
+        marks = []
+        if a.excluded:
+            marks.append("excl. = excluded")
+        if any(c.problems for c in a.cycles):
+            marks.append("✕ = rejected")
+        self.table_caption.setText(f"Per cycle ({UNIT})" + (f"; {', '.join(marks)}" if marks else ""))
+        excluded = "".join(f" Cycle {i} excluded: {reason}." for i, reason in sorted(a.excluded.items()))
         self.repeat_note.setText(
             f"Mean, SD and SEM over {k} accepted cycle{'' if k == 1 else 's'}: repeated measurements "
             "of one specimen (one mounting). They describe within-specimen repeatability only, not "
-            "variation between specimens."
+            f"variation between specimens.{excluded}"
         )
 
     def show_selection(self, a: Analysis | None, cycle: int | None, segment: str | None) -> None:
@@ -675,17 +716,27 @@ class PropertiesPanel(QWidget):
                 fit = a.cycles[cycle - 1].fit(kind)
                 value.setText(f"{_fmt(fit.slope)} {UNIT}")
                 extra.setText(f"R² {fit.r_squared:.4f}" if math.isfinite(fit.r_squared) else "")
+        self.exclusion_box.setVisible(cycle is not None)
         if cycle is None:
             k = len(a.accepted)
-            self.selection_label.setText(f"All cycles · {k} repeated cycle{'s' if k != 1 else ''} of one specimen")
+            self.selection_label.setText(f"All cycles · {k} accepted cycle{'s' if k != 1 else ''} of one specimen")
         else:
             c = a.cycles[cycle - 1]
             w = c.window
             part = f" · {segment} branch" if segment else ""
-            state = "" if not c.problems else " · rejected: " + "; ".join(c.problems)
+            if cycle in a.excluded:
+                state = f" · excluded: {a.excluded[cycle]}"
+            else:
+                state = "" if not c.problems else " · rejected: " + "; ".join(c.problems)
             self.selection_label.setText(
                 f"Cycle {cycle}{part} · heating {w.heating_s:.1f} s, cooling {w.cooling_s:.1f} s{state}"
             )
+            for widget in (self.exclude_check, self.exclude_reason):
+                widget.blockSignals(True)
+            self.exclude_check.setChecked(cycle in a.excluded)
+            self.exclude_reason.setText(a.excluded.get(cycle, ""))
+            for widget in (self.exclude_check, self.exclude_reason):
+                widget.blockSignals(False)
         table = self.results_table
         for row in range(table.rowCount()):
             selected = cycle is not None and row == cycle - 1

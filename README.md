@@ -1,104 +1,182 @@
 # Latos V2
 
-**A materials-informatics workbench for authentic laboratory measurements.**
+**A scientific workbench for experimental materials informatics.**
 
-Latos is a desktop application for analysing laboratory instrument data and, in
-later releases, for planning experiments with Bayesian optimization and
-validating its recommendations in the laboratory. The current release provides
-the **HIOKI Measurement Analyzer**: a scientific workbench for event-marked
-heating/cooling thermovoltage recordings of ionic-liquid specimens.
+Latos is a local desktop application, under development, that helps researchers
+work with authentic laboratory measurements, organize experimental observations
+and make traceable decisions about what to measure or synthesize next.
 
-Latos runs entirely on the researcher's computer. It uses no server, no cloud
-service and no language model, and it never modifies an original instrument file.
+Its research goal is one usable workflow that connects:
 
----
+- **Authentic laboratory measurement analysis.** Raw instrument files, with their
+  units, settings and sample relationships preserved.
+- **Researcher-defined experiments.** Inputs, outputs, constraints and objectives
+  set by the researcher, not fixed by the software.
+- **Bayesian optimization.** Established methods for choosing the next
+  experiments.
+- **Laboratory-ready recommendations.** Feasible, concrete instructions for the
+  next experiment.
+- **Prospective validation.** Predictions recorded before synthesis and checked
+  against the measurements that follow.
+- **Small-data scientific reliability.** An honest account of how models and
+  uncertainty estimates behave in small, noisy experimental campaigns.
 
-## Capabilities
+Latos is not specific to ionic liquids, MXenes, thermoelectrics or any fixed set
+of input variables.
 
-- **Direct instrument import.** Reads HIOKI Memory HiLogger Excel exports as
-  recorded, with channel names and units taken verbatim from the instrument header.
-- **Cycle identification.** Detects the operator's event marks and divides each
-  recording into heating and cooling segments, cycle by cycle.
-- **Scientific visualisation.** Temperature, temperature difference and voltage
-  against time; voltage against temperature difference with whole-cycle and
-  branch fits; a comparison of coefficients across cycles. Every view can show
-  all cycles together or a single cycle in detail.
-- **Apparent coefficients.** Whole-cycle, heating-only and cooling-only apparent
-  dynamic coefficients for every cycle, with mean, standard deviation and
-  within-specimen standard error.
-- **Explicit declarations.** The researcher assigns the hot, cold and voltage
-  channels and declares the voltage-lead polarity. Polarity is never inferred.
-- **Reproducible exports.** Tables, a provenance record and publication-quality
-  figures for every analysis.
+**Current status:** Milestone 1 (HIOKI Measurement Analyzer) and Milestone 2
+(experiment definition and observation management) are complete. Gaussian-process
+modeling and Bayesian optimization are next; recommendations, prospective
+validation and other instrument modules are planned. None of these is available
+yet. Latos V2 is a research prototype, not
+a validated general-purpose optimization product.
 
-## Workflow
+## Applications
 
-The workbench guides each analysis through four steps:
+The initial research applications are:
 
-**Open workbook → Confirm channels and polarity → Inspect cycles and graphs → Export results**
+- **Ionic-liquid-soaked cotton:** time-resolved thermovoltage analysis, followed
+  by planned composition optimization and prospective measurement. This is the
+  first implementation and optimization demonstration.
+- **MXene materials:** planned quantitative analysis of XRD, XPS, Raman, PPMS and
+  microscopy measurements, followed by cross-technique comparisons where
+  scientifically justified.
 
-| Area | Purpose |
-|---|---|
-| **Data Explorer** | The open workbook, its measurement, and each cycle with its heating and cooling segments. Selecting an item sets the view across the workbench. |
-| **Plot workspace** | Three graphs, each with All cycles and single-cycle views, plus pan, zoom and figure export. |
-| **Analysis and Properties** | Channel assignment and lead polarity, results for the current selection, a per-cycle comparison table, and measurement information. |
+These are application datasets, not permanent restrictions on the
+experiment-definition or optimization architecture.
+
+## Available now
+
+### HIOKI Measurement Analyzer (M1)
+
+- Opens supported HIOKI Memory HiLogger Excel exports read-only, retaining the
+  original channel labels and units.
+- Uses Event marks to identify heating and cooling cycles.
+- Plots temperature, temperature difference and voltage against time; voltage
+  against temperature difference; and a comparison of coefficients across cycles.
+- Computes whole-cycle, heating-only and cooling-only **apparent dynamic**
+  coefficients, with cycle mean, SD and within-specimen SEM.
+- Requires explicit channel assignments and voltage-lead polarity. Polarity is
+  never inferred from file names.
+- Lets the researcher exclude a cycle from the specimen value, such as an initial
+  test cycle recorded in the lab notebook, with the reason recorded. Excluded
+  cycles remain visible and are marked in every view and export.
+- Exports per-cycle and summary CSV files, a provenance JSON record and PNG/SVG
+  figures.
+
+**Workflow:** Open workbook → Confirm channels and polarity → Inspect cycles and
+graphs → Export results.
+
+### Experiment workspace (M2)
+
+- **Definition:** inputs (continuous, discrete or categorical, with units and
+  allowed ranges or values), mixtures of any number of components with a fixed
+  or variable total mass, and outputs with units and a goal (maximize, minimize
+  or reach a target).
+- **Observations:** one table row per physical specimen, with mass fractions,
+  input values, each output's response, the raw masses and the source recording.
+  Missing or out-of-range entries are flagged against the specimen.
+- **Measurement sessions:** a HIOKI analysis is attached to a specimen as a
+  session, copying the analyzer's values and provenance without recalculation.
+  Several sessions of one specimen, such as forward and reversed leads, are kept
+  side by side. One explicitly chosen **primary** session supplies the
+  specimen's response, and sessions are never averaged together. Values
+  measured elsewhere can be entered by hand.
+- **Persistence:** an experiment saves to, and reopens from, a single
+  `.latos.json` file.
+
+Constraints are currently limited to input ranges, allowed levels and a fixed
+total mass. Constraints that relate several inputs are not yet supported.
+
+## Getting started
+
+On Windows, from the Latos V2 project directory with the project's virtual
+environment and dependencies installed:
+
+```powershell
+.venv\Scripts\python -m latos2
+```
+
+1. In **HIOKI Analyzer**, choose **File ▸ Open workbook…**, confirm the channel
+   roles and voltage-lead polarity from the laboratory record, then inspect and
+   export the results.
+2. In **Experiment**, define the mixture, inputs and outputs on the Definition
+   tab, add specimens, and use **Attach HIOKI analysis…** to attach the analysis
+   shown in the analyzer to a specimen.
+
+For dependency details, see `pyproject.toml`. Latos is not yet packaged as a
+standalone installer.
 
 ## Scientific conventions
 
-| Term | Definition |
+| Quantity | Current implementation |
 |---|---|
-| ΔT | T<sub>hot</sub> − T<sub>cold</sub>, in K |
-| V<sub>rec</sub> | Cell voltage as logged, V(+) − V(−), converted from the header unit to mV |
-| σ | Wiring sign: +1 with the positive lead on the cold electrode, −1 with it on the hot electrode |
-| S<sub>app</sub> | Least-squares slope of σ·V<sub>rec</sub> against ΔT with a free intercept, in mV/K. A positive value means the cold electrode is at the higher potential. |
-| Cycle | Odd event marks switch heating on, even marks switch it off, and the final mark ends the run. Cycle *k* spans [on<sub>k</sub>, on<sub>k+1</sub>), with heating [on<sub>k</sub>, off<sub>k</sub>) and cooling [off<sub>k</sub>, on<sub>k+1</sub>). |
-| Uncertainty | Standard error of the mean over the cycles of one specimen. It describes within-specimen repeatability only; repeated cycles are not independent specimens. Per-cycle slope standard errors are reported as diagnostics. |
+| Temperature difference | ΔT = T_hot − T_cold, in K |
+| Recorded voltage | V_rec = V(+) − V(−), converted from the instrument's recorded unit to mV |
+| Polarity | σ = +1 if V+ is on the cold electrode, −1 if V+ is on the hot electrode |
+| Apparent coefficient | S_app = least-squares slope of σ × V_rec against ΔT with a free intercept, in mV/K. A positive value means the cold electrode is at the higher potential. |
+| Cycles | Odd Event marks switch heating on, even marks switch it off, and the final mark ends the run. Cycle k spans [on_k, on_k+1), with heating [on_k, off_k) and cooling [off_k, on_k+1). If the final cooling period has no closing mark, it ends at the last recorded sample; no mark is ever added to the file. |
+| Reported variability | Within-specimen statistics of repeated cycles; not independent specimen-to-specimen uncertainty |
+| Mass fraction | x_i = m_i / Σ m_j from the weighed masses. A pure-component specimen has fractions 1 and 0 by identity; an unrecorded mass is shown as *Not recorded*, never estimated. |
 
-> **S<sub>app</sub> is an apparent dynamic coefficient** of the three-minute
-> heating / three-minute cooling drive programme. It is not a validated
-> steady-state Seebeck coefficient, and a difference between the heating and
-> cooling slopes indicates hysteresis.
+**Interpretation limit:** the heating/cooling slopes describe a
+protocol-dependent apparent dynamic response. They are **not validated
+steady-state Seebeck coefficients**. Heating/cooling hysteresis and the choice of
+fitting window matter.
 
-## Data integrity
+## Reference measurements
 
-- Instrument files are opened read-only and identified by their SHA-256 digest.
-- An export is refused if the source file has changed since it was read, and
-  nothing is ever written to the folder that holds the original recordings.
-- Units come from the instrument header. A unit that cannot be interpreted is
-  refused, never assumed.
-- A recording with an unexpected layout is refused with the offending row; it is
-  never silently repaired.
+For the verified IL1 75 % / IL2 25 % recording, the three whole-cycle apparent
+coefficients are **+2.1696, +2.1801 and +2.2204 mV/K**, giving
+**+2.1900 ± 0.0155 mV/K** (mean ± within-specimen SEM). The separately analyzed
+reversed-lead recording gives **+2.2733 mV/K** under its declared polarity.
 
-## Exports
+The five specimens of the ionic-liquid campaign (IL1 = Aliquat 336TG,
+IL2 = [HMIM][TFSI]), with forward leads as the primary session:
 
-Each export creates a new, time-stamped folder:
+| Specimen | x_IL1 | S_app, mean ± SEM (mV/K) | Note |
+|---|---|---|---|
+| IL1 0 / IL2 100 | 0 (pure) | −2.6434 ± 0.3703 | Initial test cycle excluded |
+| IL1 25 / IL2 75 | 0.2396 | +2.0256 ± 0.0069 | |
+| IL1 50 / IL2 50 | 0.4813 | +2.0187 ± 0.0769 | |
+| IL1 75 / IL2 25 | 0.7587 | +2.1900 ± 0.0155 | |
+| IL1 100 / IL2 0 | 1 (pure) | +1.5642 ± 0.0279 | Initial test cycle excluded |
 
-| File | Content |
-|---|---|
-| `*_cycles.csv` | Per-cycle windows, phase durations and fits (slope, intercept, R²) for the whole cycle, heating and cooling |
-| `*_summary.csv` | Mean, standard deviation and within-specimen standard error for each coefficient type, with the definitions applied |
-| `*_analysis.json` | Provenance record: source path and SHA-256, sheet, raw headers, event marks, channel assignment, polarity, unit conversions and results |
-| `*_timeseries`, `*_voltage_vs_dT`, `*_coefficients` | Figures as PNG (300 dpi) and SVG with editable text |
+These are reproduced analysis results under specific recording conditions, not
+evidence of universal model accuracy or steady-state material performance.
 
-## Validation
+## Data integrity and exports
 
-The analyzer is validated against the authentic IL1 75 % / IL2 25 % recording.
-It reproduces the reference values established with Latos V1: whole-cycle
-S<sub>app</sub> of +2.1696, +2.1801 and +2.2204 mV/K, mean +2.1900 ± 0.0155 mV/K
-(SEM, three cycles). The reversed-lead recording, declared with the positive lead
-on the hot electrode, gives +2.2733 mV/K. The voltage unit was traced to the raw
-instrument values: a 5 µV reading step in a channel recorded in volts.
+- Original instrument files are opened read-only and identified by SHA-256.
+- Latos checks for source-file changes before exporting, and refuses to write
+  exports or experiment files into the folder that holds the original recordings.
+- Unknown units and unexpected file layouts are reported rather than guessed or
+  silently repaired.
+- An experiment file records the SHA-256 of every attached recording. When it is
+  reopened, a changed or missing recording is reported; values are never
+  silently recalculated.
+- Results export as per-cycle and summary CSV files, provenance JSON, and figures
+  in PNG (300 dpi) and SVG.
 
-## Roadmap
+## Development roadmap
 
-| Area | Status |
-|---|---|
-| HIOKI measurement analysis | Available |
-| Experiment definition and observation management | Next |
-| Gaussian-process Bayesian optimization | Planned |
-| Laboratory recommendations and prospective validation | Planned |
-| MXene instrument analysis | Planned |
+| Milestone | Purpose | Status |
+|---|---|---|
+| M1 | HIOKI measurement analysis and scientific desktop UI | **Complete** |
+| M2 | Researcher-defined experiments, mixtures, specimen/measurement relationships, observation management | **Complete** |
+| M3 | Gaussian-process modeling, uncertainty display and Bayesian acquisition | Next |
+| M4 | Laboratory-ready next-experiment instructions, frozen predictions and prospective scoring | Planned |
+| M5 | MXene instrument analysis and evidence-linked multitechnique comparisons | Planned |
 
-## Technology
+Each milestone is scoped to a usable scientific deliverable. A milestone is
+described as available only after it has been implemented and tested.
 
-Python, PySide6, NumPy, openpyxl and Matplotlib.
+## Technology and development approach
+
+Python, PySide6, NumPy, openpyxl and Matplotlib. Future numerical components will
+use established scientific libraries rather than new implementations of
+foundational algorithms. Latos runs locally, without a cloud service, a separate
+backend server or a language model.
+
+The project prioritizes scientific usefulness, transparent limitations and a
+manageable development scope over production-grade infrastructure.

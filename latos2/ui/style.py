@@ -18,6 +18,7 @@ SELECTION = "#cfe1f5"
 WARNING_BG = "#fff7e0"
 WARNING_BORDER = "#e0c068"
 OK = "#1e6b3a"
+CAUTION = "#8a5a00"
 ERROR = "#a32b20"
 HEATING = "#c0392b"
 COOLING = "#1f6fb2"
@@ -53,6 +54,10 @@ QToolButton#step[state="current"] {{ color: {ACCENT}; font-weight: 600; }}
 QToolButton#step[state="done"] {{ color: {OK}; }}
 QToolButton#step:hover {{ text-decoration: underline; }}
 QToolButton#disclosure {{ border: none; font-weight: 600; padding: 6px 0 2px 0; text-align: left; }}
+QWidget#page {{ background: {BASE}; }}
+QFrame#card {{ background: {BASE}; border: 1px solid {BORDER}; border-radius: 3px; }}
+QFrame#card[primary="true"] {{ border: 1px solid {ACCENT}; }}
+QFrame#card QLabel {{ border: none; }}
 """
 
 

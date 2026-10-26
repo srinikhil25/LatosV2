@@ -1,4 +1,4 @@
-"""The HIOKI Measurement Analyzer window: explorer, plot workspace, properties."""
+"""The main window: the HIOKI Measurement Analyzer and the Experiment workspace."""
 
 from __future__ import annotations
 
@@ -6,13 +6,14 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, QStandardPaths, Qt, QUrl
-from PySide6.QtGui import QAction, QDesktopServices, QKeySequence
+from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (
     QFileDialog,
     QLabel,
     QMainWindow,
     QMessageBox,
     QSplitter,
+    QStackedWidget,
     QStyle,
     QVBoxLayout,
     QWidget,
@@ -30,10 +31,10 @@ from latos2.thermovoltage import (
     CycleBoundaryError,
     CycleWindow,
     analyze,
-    event_boundaries,
-    windows_from_boundaries,
+    trace_windows,
 )
 from latos2.ui import style
+from latos2.ui.experiment_view import ExperimentView
 from latos2.ui.panels import DataExplorer, PlotWorkspace, PropertiesPanel, WorkflowBar
 from latos2.units import UnitError, quantization_step, voltage_factor_to_mv
 
@@ -49,7 +50,7 @@ def _inside(child: Path, parent: Path) -> bool:
 
 
 class MainWindow(QMainWindow):
-    """Open a workbook, confirm channels and polarity, inspect, export."""
+    """Analyse HIOKI recordings, and collect the specimens of an experiment."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -61,10 +62,13 @@ class MainWindow(QMainWindow):
         self.windows: tuple[CycleWindow, ...] = ()
         self.view_cycle: int | None = None
         self.view_segment: str | None = None
+        self.excluded: dict[int, str] = {}
         self.exported = False
 
         icons = self.style()
-        self.open_action = QAction(icons.standardIcon(QStyle.StandardPixmap.SP_DialogOpenButton), "Open…", self)
+        self.open_action = QAction(
+            icons.standardIcon(QStyle.StandardPixmap.SP_DialogOpenButton), "Open workbook…", self
+        )
         self.open_action.setShortcut(QKeySequence.StandardKey.Open)
         self.open_action.setToolTip("Open a HIOKI workbook (.xlsx)")
         self.open_action.triggered.connect(lambda: self.open_file())
@@ -80,17 +84,61 @@ class MainWindow(QMainWindow):
         about_action = QAction("About Latos V2", self)
         about_action.triggered.connect(self._about)
 
+        self.experiment_view = ExperimentView(lambda: self.analysis)
+        view = self.experiment_view
+        self.new_experiment_action = QAction(
+            icons.standardIcon(QStyle.StandardPixmap.SP_FileIcon), "New experiment", self
+        )
+        self.new_experiment_action.triggered.connect(lambda: self._experiment_mode() and view.new_experiment())
+        self.open_experiment_action = QAction(
+            icons.standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon), "Open experiment…", self
+        )
+        self.open_experiment_action.triggered.connect(lambda: self._experiment_mode() and view.open_experiment())
+        self.save_experiment_action = QAction(
+            icons.standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton), "Save experiment", self
+        )
+        self.save_experiment_action.setShortcut(QKeySequence.StandardKey.Save)
+        self.save_experiment_action.triggered.connect(lambda: view.save())
+        save_as_action = QAction("Save experiment as…", self)
+        save_as_action.triggered.connect(lambda: view.save_as())
+
+        self.mode_group = QActionGroup(self)
+        self.analyzer_mode_action = QAction("HIOKI Analyzer", self.mode_group)
+        self.experiment_mode_action = QAction("Experiment", self.mode_group)
+        for action, mode in ((self.analyzer_mode_action, "analyzer"), (self.experiment_mode_action, "experiment")):
+            action.setCheckable(True)
+            action.triggered.connect(lambda _checked=False, m=mode: self.set_mode(m))
+        self.analyzer_mode_action.setToolTip("Analyse one HIOKI recording")
+        self.experiment_mode_action.setToolTip("Define the experiment and collect its specimens and measurements")
+
         file_menu = self.menuBar().addMenu("&File")
         file_menu.addAction(self.open_action)
         file_menu.addAction(self.export_action)
         file_menu.addSeparator()
+        for action in (self.new_experiment_action, self.open_experiment_action, self.save_experiment_action, save_as_action):
+            file_menu.addAction(action)
+        file_menu.addSeparator()
         file_menu.addAction(quit_action)
+        view_menu = self.menuBar().addMenu("&View")
+        view_menu.addAction(self.analyzer_mode_action)
+        view_menu.addAction(self.experiment_mode_action)
         self.menuBar().addMenu("&Help").addAction(about_action)
-        toolbar = self.addToolBar("Main")
-        toolbar.setMovable(False)
-        toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        toolbar.addAction(self.open_action)
-        toolbar.addAction(self.export_action)
+
+        def bar(name: str):
+            toolbar = self.addToolBar(name)
+            toolbar.setMovable(False)
+            toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+            return toolbar
+
+        mode_bar = bar("Workspace")
+        mode_bar.addAction(self.analyzer_mode_action)
+        mode_bar.addAction(self.experiment_mode_action)
+        self.analyzer_bar = bar("Analyzer")
+        self.analyzer_bar.addAction(self.open_action)
+        self.analyzer_bar.addAction(self.export_action)
+        self.experiment_bar = bar("Experiment")
+        for action in (self.new_experiment_action, self.open_experiment_action, self.save_experiment_action):
+            self.experiment_bar.addAction(action)
 
         self.workflow = WorkflowBar()
         self.explorer = DataExplorer()
@@ -106,13 +154,18 @@ class MainWindow(QMainWindow):
         self.workspace.setMinimumWidth(480)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([260, 800, 380])
-        central = QWidget()
-        layout = QVBoxLayout(central)
+        analyzer = QWidget()
+        layout = QVBoxLayout(analyzer)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(self.workflow)
         layout.addWidget(splitter, 1)
-        self.setCentralWidget(central)
+        self.pages = QStackedWidget()
+        self.pages.addWidget(analyzer)
+        self.pages.addWidget(self.experiment_view)
+        self.setCentralWidget(self.pages)
+        view.titleChanged.connect(lambda _title: self._update_title())
+        view.statusMessage.connect(lambda text: self.statusBar().showMessage(text, 8000))
         self.coordinates = QLabel("")
         self.coordinates.setMinimumWidth(190)
         self.statusBar().addPermanentWidget(self.coordinates)
@@ -133,6 +186,8 @@ class MainWindow(QMainWindow):
         # id: QButtonGroup reports -1 when nothing is checked, which would
         # read as "V+ on the HOT electrode".
         p.wiring_group.buttonToggled.connect(lambda _button, checked: checked and self._reanalyze())
+        p.exclude_check.toggled.connect(self._on_exclude_toggled)
+        p.exclude_reason.editingFinished.connect(self._on_reason_edited)
         self.workflow.stepClicked.connect(self._on_step)
         self.explorer.openRequested.connect(lambda: self.open_file())
         self.explorer.selectionChanged.connect(self._set_view)
@@ -141,8 +196,41 @@ class MainWindow(QMainWindow):
         self.workspace.saveRequested.connect(self._save_figure)
         self.workspace.coordinatesChanged.connect(self.coordinates.setText)
 
-        self._show_status("Open a HIOKI workbook (File ▸ Open…, Ctrl+O) to begin.", style.MUTED)
+        self._show_status("Open a HIOKI workbook (File ▸ Open workbook…, Ctrl+O) to begin.", style.MUTED)
         self._invalidate()
+        self.set_mode("analyzer")
+
+    # -- workspaces ---------------------------------------------------------
+
+    def set_mode(self, mode: str) -> None:
+        """Show the HIOKI Analyzer ("analyzer") or the Experiment workspace ("experiment")."""
+        experiment = mode == "experiment"
+        self.pages.setCurrentIndex(1 if experiment else 0)
+        (self.experiment_mode_action if experiment else self.analyzer_mode_action).setChecked(True)
+        self.analyzer_bar.setVisible(not experiment)
+        self.experiment_bar.setVisible(experiment)
+        self.coordinates.setVisible(not experiment)
+        self.export_link.setVisible(not experiment)
+        self.statusBar().clearMessage()
+        if experiment:
+            self.experiment_view.refresh_current()
+        self._update_title()
+
+    def _experiment_mode(self) -> bool:
+        self.set_mode("experiment")
+        return True
+
+    def _update_title(self) -> None:
+        if self.pages.currentIndex() == 1:
+            self.setWindowTitle(f"Latos V2 — Experiment: {self.experiment_view.title()}")
+        else:
+            self.setWindowTitle("Latos V2 — HIOKI Measurement Analyzer")
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        if self.experiment_view.maybe_discard():
+            event.accept()
+        else:
+            event.ignore()
 
     # -- actions ------------------------------------------------------------
 
@@ -164,11 +252,10 @@ class MainWindow(QMainWindow):
         self.settings.setValue("last_open_dir", str(path.parent))
         self.trace = trace
         self.analysis = None
+        self.excluded = {}
         self.view_cycle, self.view_segment = None, None
         try:
-            self.windows = windows_from_boundaries(
-                event_boundaries([e.number for e in trace.events], [e.time_s for e in trace.events])
-            )
+            self.windows = trace_windows(trace)[0]
         except CycleBoundaryError:
             self.windows = ()
         self.explorer.show_trace(trace, self.windows)
@@ -197,6 +284,28 @@ class MainWindow(QMainWindow):
             if button.isChecked():
                 return sign
         return None
+
+    def exclude_cycle(self, cycle: int, reason: str) -> None:
+        """Leave one cycle out of the specimen value, with the reason recorded."""
+        self.excluded[cycle] = reason.strip() or "Excluded by researcher"
+        self._reanalyze()
+
+    def include_cycle(self, cycle: int) -> None:
+        """Return an excluded cycle to the specimen value."""
+        self.excluded.pop(cycle, None)
+        self._reanalyze()
+
+    def _on_exclude_toggled(self, checked: bool) -> None:
+        if self.view_cycle is None:
+            return
+        if checked:
+            self.exclude_cycle(self.view_cycle, self.properties.exclude_reason.text())
+        else:
+            self.include_cycle(self.view_cycle)
+
+    def _on_reason_edited(self) -> None:
+        if self.view_cycle in self.excluded:
+            self.exclude_cycle(self.view_cycle, self.properties.exclude_reason.text())
 
     def export(self, out_dir: Path | None = None) -> list[Path]:
         """Export the current analysis into a new folder under `out_dir`."""
@@ -303,6 +412,8 @@ class MainWindow(QMainWindow):
         self.status_label.setVisible(color != style.OK)
         if color == style.OK:
             self.statusBar().showMessage(text, 8000)
+        else:
+            self.statusBar().clearMessage()
 
     def _reanalyze(self) -> None:
         self.analysis = None
@@ -337,7 +448,7 @@ class MainWindow(QMainWindow):
             self._invalidate()
             return
         try:
-            analysis = analyze(trace, roles, sign)
+            analysis = analyze(trace, roles, sign, self.excluded)
         except (ValueError, KeyError) as exc:
             # UnitError and CycleBoundaryError are ValueErrors.
             kind = "Event marks" if isinstance(exc, CycleBoundaryError) else "Cannot analyse"
@@ -346,8 +457,9 @@ class MainWindow(QMainWindow):
             return
 
         self.analysis = analysis
-        rejected = {c.window.index for c in analysis.cycles if c.problems}
-        self.explorer.mark_rejected(rejected)
+        states = {c.window.index: "rejected" for c in analysis.cycles if c.problems}
+        states.update({index: "excluded" for index in analysis.excluded})
+        self.explorer.mark_cycles(states)
         self.properties.show_results(analysis)
         self.properties.show_selection(analysis, self.view_cycle, self.view_segment)
         if analysis.reductions is None:
@@ -355,6 +467,12 @@ class MainWindow(QMainWindow):
         elif analysis.problems:
             self._show_status(
                 "Some cycles were rejected and left out of the means:\n• " + "\n• ".join(analysis.problems),
+                "#8a5a00",
+            )
+        elif analysis.excluded:
+            self._show_status(
+                f"{len(analysis.cycles)} cycles analysed; {len(analysis.accepted)} in the specimen value, "
+                f"{len(analysis.excluded)} excluded by the researcher.",
                 "#8a5a00",
             )
         else:
