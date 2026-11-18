@@ -171,7 +171,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(splitter, 1)
         self.pages = QStackedWidget()
         self.pages.addWidget(analyzer)
-        self.optimization_view = OptimizationView(lambda: self.experiment_view.experiment)
+        self.optimization_view = OptimizationView(
+            lambda: self.experiment_view.experiment, save=lambda: self.experiment_view.save()
+        )
         self.pages.addWidget(self.experiment_view)
         self.pages.addWidget(self.optimization_view)
         self.setCentralWidget(self.pages)

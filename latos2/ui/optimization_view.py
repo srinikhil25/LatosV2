@@ -1,4 +1,5 @@
-"""The Optimization workspace: fit a Gaussian process and review a provisional next condition."""
+"""The Optimization workspace: fit a Gaussian process, review a provisional next condition,
+freeze it as a prediction, and score the specimens that test it."""
 
 from __future__ import annotations
 
@@ -6,6 +7,7 @@ import html
 import json
 from collections.abc import Callable
 from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QStandardPaths, Qt, Signal
@@ -22,8 +24,10 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
@@ -41,6 +45,7 @@ from PySide6.QtWidgets import (
 )
 
 from latos2 import experiment as ex
+from latos2 import predictions as preds
 from latos2.bo_figures import draw_acquisition, draw_surrogate
 from latos2.gp import RESTARTS, Z95
 from latos2.optimization import (
@@ -54,13 +59,18 @@ from latos2.optimization import (
     prepare,
     recommend,
 )
+from latos2.prep_sheet import write_preparation_sheet
+from latos2.project_io import ProjectError
 from latos2.ui import style
 from latos2.ui.experiment_view import _item, _muted, _number, _plain, _section
 from latos2.ui.panels import PlotPage, _fit_table_height, _label, _styled
 
 _GOALS = {"maximize": "Maximize", "minimize": "Minimize", "target": "Reach a target"}
 _ACQUISITIONS = {"ei": "Expected improvement", "explore": "Largest model uncertainty (explore)"}
-_TABS = ("Observations", "Surrogate Model", "Acquisition and Recommendation")
+_TABS = ("Observations", "Surrogate Model", "Acquisition and Recommendation", "Predictions")
+PREDICTIONS_TAB = 3
+_PREDICTION_ROLE = Qt.ItemDataRole.UserRole + 1
+_TIMING = {"after": "After the freeze", "before": "Before the freeze", "unknown": "Not confirmed"}
 
 
 def _value(output: ex.OutputDefinition, value: float | None, signed: bool = True) -> str:
@@ -82,15 +92,41 @@ def _condition(problem: Problem, c: Candidate) -> str:
     return "; ".join(parts)
 
 
+def _pvalue(p: ex.Prediction, value: float | None, signed: bool = True) -> str:
+    """A value in a frozen prediction's output, formatted as the output's values are."""
+    method = p.record.get("output", {}).get("method", ex.MANUAL)
+    return _value(ex.OutputDefinition(p.output, p.unit, method), value, signed)
+
+
+def _local(stamp: str) -> str:
+    return datetime.fromisoformat(stamp).strftime("%Y-%m-%d %H:%M")
+
+
+def _table(headers: list[str]) -> QTableWidget:
+    table = QTableWidget(0, len(headers))
+    table.setHorizontalHeaderLabels(headers)
+    table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+    table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+    table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+    table.setAlternatingRowColors(True)
+    table.setWordWrap(False)
+    table.verticalHeader().setVisible(False)
+    table.verticalHeader().setDefaultSectionSize(24)
+    table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+    table.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    return table
+
+
 class RecordDialog(QDialog):
     """The full model record, as JSON, for review or for keeping with lab notes."""
 
-    def __init__(self, parent: QWidget, record: dict) -> None:
+    def __init__(self, parent: QWidget, record: dict, heading: str = "") -> None:
         super().__init__(parent)
         self.setWindowTitle("Model record")
         self.resize(640, 560)
         layout = QVBoxLayout(self)
-        layout.addWidget(_label(STATUS + ". Nothing is frozen or authorised by this record.", "muted", True))
+        heading = heading or STATUS + ". Nothing is frozen or authorised by this record."
+        layout.addWidget(_label(heading, "muted", True))
         self.text = QPlainTextEdit(json.dumps(record, indent=2, ensure_ascii=False))
         self.text.setReadOnly(True)
         layout.addWidget(self.text, 1)
@@ -101,15 +137,47 @@ class RecordDialog(QDialog):
         layout.addWidget(buttons)
 
 
+class FreezeDialog(QDialog):
+    """Confirm what is frozen, with an optional note."""
+
+    def __init__(self, parent: QWidget, summary: str, has_masses: bool) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Freeze prediction")
+        self.resize(520, 300)
+        layout = QVBoxLayout(self)
+        text = (
+            f"{summary}<br><br>Freezing fixes this prediction, with the full model record, before the specimen is "
+            "prepared or measured. It cannot be edited afterwards; while no specimen tests it, it can be withdrawn "
+            "with a reason, and it is never deleted. <b>The experiment is saved now.</b>"
+        )
+        if not has_masses:
+            text += "<br><br>No total mass is entered, so the preparation sheet will give fractions without masses."
+        info = _label(text, wrap=True)
+        info.setTextFormat(Qt.TextFormat.RichText)
+        layout.addWidget(info)
+        layout.addWidget(_label("Note (optional)", "muted"))
+        self.note = QLineEdit()
+        self.note.setPlaceholderText("such as: prepared by …, batch …")
+        layout.addWidget(self.note)
+        layout.addStretch(1)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
+        buttons.addButton("Freeze and save", QDialogButtonBox.ButtonRole.AcceptRole)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+
 class OptimizationView(QWidget):
-    """Set up the search, fit the model, and inspect the provisional recommendation."""
+    """Set up the search, fit the model, inspect the provisional recommendation, and freeze it."""
 
     changed = Signal()  # the researcher edited settings stored in the experiment
     statusMessage = Signal(str)
 
-    def __init__(self, experiment: Callable[[], ex.Experiment]) -> None:
+    def __init__(self, experiment: Callable[[], ex.Experiment], save: Callable[[], bool] | None = None) -> None:
+        """`save` writes the experiment to its file; a freeze is saved at once."""
         super().__init__()
         self.experiment = experiment
+        self._save = save
         self.problem: Problem | None = None
         self.result: Result | None = None
         self._fingerprint: str | None = None
@@ -224,6 +292,7 @@ class OptimizationView(QWidget):
         lower.addWidget(self.sensitivity_note)
         layout.addWidget(holder)
         self.stack.addWidget(page)
+        self.stack.addWidget(self._build_predictions())
 
         self.tabs.currentChanged.connect(self.stack.setCurrentIndex)
         layout = QVBoxLayout(centre)
@@ -233,6 +302,61 @@ class OptimizationView(QWidget):
         layout.addWidget(self.stack, 1)
         centre.setMinimumWidth(480)
         return centre
+
+    def _build_predictions(self) -> QWidget:
+        page = _styled(QWidget(), "page")
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        toolbar = _styled(QWidget(), "plotToolbar")
+        bar = QHBoxLayout(toolbar)
+        bar.setContentsMargins(6, 3, 6, 3)
+        bar.setSpacing(2)
+
+        def tool(text: str, tip: str, slot: Callable[[], object]) -> QToolButton:
+            button = QToolButton()
+            button.setText(text)
+            button.setToolTip(tip)
+            button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            button.clicked.connect(lambda _checked=False: slot())
+            bar.addWidget(button)
+            return button
+
+        self.sheet_button = tool(
+            "Export preparation sheet…", "Save a printable PDF for preparing and measuring the selected prediction",
+            self._on_sheet,
+        )
+        self.frozen_record_button = tool(
+            "Show frozen record…", "The model record frozen with the selected prediction", self._on_frozen_record
+        )
+        self.withdraw_button = tool(
+            "Withdraw…", "Withdraw the selected prediction, with a reason; it is kept and shown as withdrawn",
+            self._on_withdraw,
+        )
+        bar.addStretch(1)
+        outer.addWidget(toolbar)
+
+        body = QWidget()
+        layout = QVBoxLayout(body)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+        layout.addWidget(_label("Frozen predictions", "sectionTitle"))
+        self.predictions_table = _table(
+            ["Prediction", "Frozen", "Condition", "Predicted ± model SD", "95 % interval, new measurement",
+             "Status", "Note"]
+        )
+        self.predictions_table.itemSelectionChanged.connect(self._update_prediction_buttons)
+        layout.addWidget(self.predictions_table, 1)
+        layout.addWidget(_label("Prospective tests", "sectionTitle"))
+        self.tests_table = _table(
+            ["Prediction", "Specimen", "Measured ± SEM", "Predicted ± SD (new)", "Error", "z",
+             "In frozen 95 %", "Gain over best before", "Actual − frozen condition", "Recorded"]
+        )
+        layout.addWidget(self.tests_table, 1)
+        self.tests_caption = _label("", "muted", True)
+        layout.addWidget(self.tests_caption)
+        outer.addWidget(body, 1)
+        return page
 
     def _build_panel(self) -> QWidget:
         panel = _styled(QWidget(), "panel")
@@ -358,6 +482,16 @@ class OptimizationView(QWidget):
         self.preparation_note = _label("", "muted", True)
         box.addWidget(self.preparation_note)
 
+        _section(box, "Freeze")
+        self.frozen_label = _label("", "muted", True)
+        box.addWidget(self.frozen_label)
+        self.freeze_button = QPushButton("Freeze prediction…")
+        self.freeze_button.setToolTip(
+            "Fix this prediction before the specimen is prepared, so that its measurement can be scored against it"
+        )
+        self.freeze_button.clicked.connect(self._on_freeze)
+        box.addWidget(self.freeze_button, 0, Qt.AlignmentFlag.AlignLeft)
+
         _section(box, "Baseline Comparison")
         self.baseline_label = _label("", wrap=True)
         self.baseline_label.setTextFormat(Qt.TextFormat.RichText)
@@ -420,6 +554,7 @@ class OptimizationView(QWidget):
         self._load_settings()
         self._update_problem()
         self._show_result()
+        self._fill_predictions()
 
     def set_fraction_bounds(self, component: str, lower: float, upper: float) -> None:
         """Set a component's search domain, as typing it does."""
@@ -446,10 +581,70 @@ class OptimizationView(QWidget):
         self.statusMessage.emit(f"Model fitted to {len(self.problem.used)} specimens; {STATUS.lower()}.")
         return True
 
+    def freeze(self, note: str = "") -> ex.Prediction:
+        """Freeze the current recommendation and save the experiment at once.
+
+        Raises:
+            ValueError: If there is nothing to freeze, it is already frozen, or
+                the experiment could not be saved (the freeze is then undone).
+        """
+        if self.result is None:
+            raise ValueError("fit the model first; there is no recommendation to freeze")
+        exp = self.experiment()
+        p = preds.freeze(exp, self.result, note)
+        self.changed.emit()
+        if self._save is not None and not self._save():
+            exp.predictions.remove(p)
+            self.changed.emit()
+            self._show_result()
+            self._fill_predictions()
+            raise ValueError("the experiment was not saved, so nothing was frozen; a freeze is saved at once")
+        self._show_result()
+        self._fill_predictions()
+        self.statusMessage.emit(f"Frozen as {p.id}" + (" and saved." if self._save is not None else "."))
+        return p
+
+    def withdraw(self, prediction_id: str, reason: str) -> None:
+        """Withdraw a prediction no specimen tests, and save at once.
+
+        Raises:
+            ValueError: If it cannot be withdrawn, or the experiment could not be saved.
+        """
+        exp = self.experiment()
+        preds.withdraw(exp, prediction_id, reason)
+        self.changed.emit()
+        if self._save is not None and not self._save():
+            p = exp.prediction(prediction_id)
+            p.withdrawn_at, p.withdrawn_reason = None, ""
+            self.changed.emit()
+            self._fill_predictions()
+            raise ValueError("the experiment was not saved, so the prediction was not withdrawn")
+        self._fill_predictions()
+        self._fill_tree()
+        self.statusMessage.emit(f"{prediction_id} withdrawn.")
+
+    def export_sheet(self, prediction_id: str, path: Path) -> Path:
+        """Write the preparation sheet of a prediction as PDF.
+
+        Raises:
+            ValueError, ProjectError: If it cannot be written.
+        """
+        exp = self.experiment()
+        p = exp.prediction(prediction_id)
+        if p is None:
+            raise ValueError(f"there is no prediction {prediction_id}")
+        written = write_preparation_sheet(exp, p, path)
+        self.statusMessage.emit(f"Saved {written}")
+        return written
+
     @staticmethod
     def _fingerprint_of(exp: ex.Experiment) -> str:
+        # Frozen predictions and specimen links do not change the data the model is fitted to.
         data = asdict(exp)
         data.pop("optimization", None)
+        data.pop("predictions", None)
+        for s in data["specimens"]:
+            s.pop("prediction", None)
         return f"{id(exp)}:{json.dumps(data, sort_keys=True, default=str)}"
 
     # -- settings -----------------------------------------------------------
@@ -633,6 +828,7 @@ class OptimizationView(QWidget):
             s.preparation_total_g, s.balance_resolution_g = total, resolution
             self.changed.emit()
         self._show_preparation()
+        self._show_freeze()
 
     # -- display ------------------------------------------------------------
 
@@ -751,6 +947,16 @@ class OptimizationView(QWidget):
                 c = self.result.choice
                 item = QTreeWidgetItem(root, ["Provisional candidate: " + _condition(p, c).split(";")[0]])
                 item.setForeground(0, QColor(style.HEATING))
+        if exp.predictions:
+            frozen = QTreeWidgetItem(root, [f"Frozen predictions: {len(exp.predictions)}"])
+            for prediction in exp.predictions:
+                state = preds.status(exp, prediction)
+                item = QTreeWidgetItem(frozen, [f"{prediction.id}: {state}"])
+                item.setData(0, _PREDICTION_ROLE, prediction.id)
+                if state in ("Withdrawn",):
+                    item.setForeground(0, QColor(style.MUTED))
+                elif state == "Altered outside Latos":
+                    item.setForeground(0, QColor(style.ERROR))
         items = [root]
         while items:
             item = items.pop()
@@ -761,6 +967,13 @@ class OptimizationView(QWidget):
 
     def _on_tree(self) -> None:
         item = self.tree.currentItem()
+        prediction = item.data(0, _PREDICTION_ROLE) if item else None
+        if prediction is not None:
+            self.tabs.setCurrentIndex(PREDICTIONS_TAB)
+            for row in range(self.predictions_table.rowCount()):
+                if self.predictions_table.item(row, 0).text() == prediction:
+                    self.predictions_table.selectRow(row)
+            return
         specimen = item.data(0, Qt.ItemDataRole.UserRole) if item else None
         if specimen is None:
             return
@@ -812,6 +1025,7 @@ class OptimizationView(QWidget):
         )
         self.explanation_label.setText(r.explanation)
         self._show_preparation()
+        self._show_freeze()
         self.baseline_label.setText(
             "<table cellspacing='0' cellpadding='2'>"
             "<tr><th align='left'>Strategy</th><th align='left'>Condition</th><th align='left'>Predicted</th></tr>"
@@ -934,6 +1148,194 @@ class OptimizationView(QWidget):
             status + f"Total {prep.total_g:.{decimals}f} g at a resolution of {prep.resolution_g:g} g. "
             + " ".join(prep.notes)
         )
+
+    # -- frozen predictions -------------------------------------------------
+
+    def _show_freeze(self) -> None:
+        r = self.result
+        if r is None:
+            return
+        frozen = preds.frozen_as(self.experiment(), r.record)
+        self.freeze_button.setEnabled(frozen is None)
+        if frozen is not None:
+            self.frozen_label.setText(
+                f"Frozen as {frozen.id} on {_local(frozen.frozen_at)}. See Predictions for its preparation sheet "
+                "and its tests."
+            )
+            self.frozen_label.setStyleSheet(f"color: {style.OK};")
+            return
+        self.frozen_label.setStyleSheet("")
+        text = (
+            "Not frozen. Freeze this prediction before preparing the specimen, so that its measurement is a "
+            "prospective test."
+        )
+        if r.choice.fractions and self.settings.preparation_total_g is None:
+            text += " Enter the total mass first to put the masses on the preparation sheet."
+        self.frozen_label.setText(text)
+
+    def _selected_prediction(self) -> ex.Prediction | None:
+        rows = self.predictions_table.selectionModel().selectedRows()
+        if not rows:
+            return None
+        return self.experiment().prediction(self.predictions_table.item(rows[0].row(), 0).text())
+
+    def _update_prediction_buttons(self) -> None:
+        p = self._selected_prediction()
+        exp = self.experiment()
+        usable = p is not None and preds.intact(p) and not p.withdrawn_at
+        self.sheet_button.setEnabled(usable)
+        self.frozen_record_button.setEnabled(p is not None)
+        self.withdraw_button.setEnabled(usable and not preds.testers(exp, p.id))
+
+    def _fill_predictions(self) -> None:
+        exp = self.experiment()
+        selected = self._selected_prediction()
+        table = self.predictions_table
+        table.setRowCount(len(exp.predictions))
+        for row, p in enumerate(exp.predictions):
+            state = preds.status(exp, p)
+            lo, hi = p.interval_95
+            unit = f" {p.unit}" if p.unit else ""
+            status = _item(state, tip=f"Withdrawn {_local(p.withdrawn_at)}: {p.withdrawn_reason}" if p.withdrawn_at else state)
+            colour = {"Withdrawn": style.MUTED, "Altered outside Latos": style.ERROR}.get(state)
+            if colour:
+                status.setForeground(QColor(colour))
+            cells = [
+                _item(p.id, tip=f"SHA-256 {p.sha256}"),
+                _item(_local(p.frozen_at), tip=p.frozen_at),
+                _item(preds.describe(p)),
+                _item(f"{_pvalue(p, p.predicted_mean)} ± {_pvalue(p, p.latent_sd, False)}{unit}", numeric=True),
+                _item(f"{_pvalue(p, lo)} to {_pvalue(p, hi)}{unit}", numeric=True),
+                status,
+                _item(p.note),
+            ]
+            for col, item in enumerate(cells):
+                if p.withdrawn_at and col != 5:
+                    _muted(item, italic=False)
+                table.setItem(row, col, item)
+            if selected is not None and p.id == selected.id:
+                table.selectRow(row)
+        if selected is None and exp.predictions:
+            table.selectRow(len(exp.predictions) - 1)  # the latest, so its actions are at hand
+
+        all_tests = preds.tests(exp)
+        table = self.tests_table
+        table.setRowCount(len(all_tests))
+        for row, t in enumerate(all_tests):
+            p = t.prediction
+            cells = [_item(p.id), _item(t.specimen_id)]
+            if not t.scored:
+                cells.append(_muted(_item(t.problem)))
+                cells += [_muted(_item("—", numeric=True), False) for _ in range(4)]
+            else:
+                measured = _pvalue(p, t.measured)
+                if t.sem is not None:
+                    measured += f" ± {_pvalue(p, t.sem, False)}"
+                inside = _item("Yes" if t.inside else "No")
+                inside.setForeground(QColor(style.OK if t.inside else style.CAUTION))
+                cells += [
+                    _item(measured, numeric=True),
+                    _item(f"{_pvalue(p, p.predicted_mean)} ± {_pvalue(p, p.predictive_sd, False)}", numeric=True),
+                    _item(_pvalue(p, t.error), numeric=True),
+                    _item("—" if t.z is None else f"{t.z:+.2f}", numeric=True),
+                    inside,
+                ]
+            gain = "—" if t.gain is None else _pvalue(p, t.gain)
+            cells.append(_item(gain, numeric=True, tip=f"Best before freezing: {p.best_before_specimen}"))
+            deviation = "; ".join(f"{name} {value:+.4g}" for name, value in t.deviations.items()) or "—"
+            cells.append(_item(deviation))
+            recorded = _item(_TIMING[t.timing.state], tip=t.timing.text)
+            if t.timing.state == "before":
+                recorded.setForeground(QColor(style.CAUTION))
+            cells.append(recorded)
+            for col, item in enumerate(cells):
+                table.setItem(row, col, item)
+
+        text = preds.summary(all_tests) if all_tests else (
+            "No specimen tests a frozen prediction yet. In Experiment, set Tests prediction in the specimen form."
+            if exp.predictions else
+            "No prediction is frozen yet. Fit the model, then use Freeze prediction… in the panel on the right."
+        )
+        if all_tests:
+            text += (
+                " Each specimen is scored against the frozen values only: the 95 % interval is the predicted mean ± "
+                "1.96 × the SD frozen for a new measurement, and z is the error over that SD. The gain is the "
+                "improvement over the best response measured before freezing. Actual − frozen condition is the "
+                "specimen's composition and inputs minus the frozen ones; it is reported, not corrected for."
+            )
+        altered = [p.id for p in exp.predictions if not preds.intact(p)]
+        if altered:
+            text += f" ⚠ {', '.join(altered)} no longer hold what was frozen: the file was edited outside Latos."
+        self.tests_caption.setText(text)
+        self._update_prediction_buttons()
+
+    def _on_freeze(self) -> None:
+        r = self.result
+        if r is None:
+            return
+        output = r.problem.output
+        unit = f" {output.unit}" if output.unit else ""
+        c = r.choice
+        lo, hi = c.mean - Z95 * c.predictive_sd, c.mean + Z95 * c.predictive_sd
+        summary = (
+            f"<b>{html.escape(_condition(r.problem, c))}</b><br>Predicted {html.escape(output.name)}: "
+            f"{_value(output, c.mean)} ± {_value(output, c.sd, False)}{html.escape(unit)} (model SD); "
+            f"95 % interval for a new measurement {_value(output, lo)} to {_value(output, hi)}{html.escape(unit)}"
+        )
+        has_masses = not c.fractions or self.settings.preparation_total_g is not None
+        dialog = FreezeDialog(self, summary, has_masses)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            p = self.freeze(dialog.note.text())
+        except ValueError as exc:
+            QMessageBox.warning(self, "Not frozen", str(exc)[:1].upper() + str(exc)[1:] + ".")
+            return
+        self.tabs.setCurrentIndex(PREDICTIONS_TAB)
+        for row in range(self.predictions_table.rowCount()):
+            if self.predictions_table.item(row, 0).text() == p.id:
+                self.predictions_table.selectRow(row)
+
+    def _on_sheet(self) -> None:
+        p = self._selected_prediction()
+        if p is None:
+            return
+        start = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)
+        stem = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in self.experiment().name)
+        chosen, _ = QFileDialog.getSaveFileName(
+            self, "Export preparation sheet", str(Path(start) / f"{stem}_{p.id}_preparation.pdf"), "PDF (*.pdf)"
+        )
+        if not chosen:
+            return
+        try:
+            self.export_sheet(p.id, Path(chosen))
+        except (ValueError, ProjectError, OSError) as exc:
+            QMessageBox.warning(self, "Cannot export the sheet", str(exc)[:1].upper() + str(exc)[1:] + ".")
+
+    def _on_frozen_record(self) -> None:
+        p = self._selected_prediction()
+        if p is None:
+            return
+        state = "intact" if preds.intact(p) else "ALTERED since freezing"
+        RecordDialog(
+            self, p.record,
+            f"Model record frozen with {p.id} on {_local(p.frozen_at)}; content {state} (SHA-256 {p.sha256[:16]}…).",
+        ).exec()
+
+    def _on_withdraw(self) -> None:
+        p = self._selected_prediction()
+        if p is None:
+            return
+        reason, ok = QInputDialog.getText(
+            self, f"Withdraw {p.id}",
+            f"Why is {p.id} withdrawn? It stays in the experiment, shown as withdrawn, and cannot be tested.",
+        )
+        if not ok:
+            return
+        try:
+            self.withdraw(p.id, reason)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Not withdrawn", str(exc)[:1].upper() + str(exc)[1:] + ".")
 
     def _save_figure(self, plot: PlotPage) -> None:
         if self.result is None:

@@ -1,9 +1,10 @@
 """Save and reopen an experiment as a single JSON file.
 
 The file holds the definition, every specimen and every measurement session,
-including the analyzer's provenance record of each HIOKI session. Writing goes
-to a temporary file first and replaces the target only when complete, so an
-interrupted save never leaves a half-written project.
+including the analyzer's provenance record of each HIOKI session, and every
+frozen prediction with its model record. Writing goes to a temporary file
+first and replaces the target only when complete, so an interrupted save never
+leaves a half-written project.
 """
 
 from __future__ import annotations
@@ -22,10 +23,11 @@ from latos2.experiment import (
     Mixture,
     OptimizationSettings,
     OutputDefinition,
+    Prediction,
     Specimen,
 )
 
-__all__ = ["SCHEMA", "SUFFIX", "ProjectError", "load_experiment", "save_experiment"]
+__all__ = ["SCHEMA", "SUFFIX", "ProjectError", "check_not_recordings_folder", "load_experiment", "save_experiment"]
 
 SCHEMA = "latos2-experiment/1"
 SUFFIX = ".latos.json"
@@ -33,6 +35,19 @@ SUFFIX = ".latos.json"
 
 class ProjectError(ValueError):
     """The experiment file cannot be written or read."""
+
+
+def check_not_recordings_folder(exp: Experiment, path: Path, what: str = "the experiment") -> None:
+    """Refuse a file path in the folder of any recording attached to the experiment.
+
+    Raises:
+        ProjectError: If `path` is in such a folder.
+    """
+    folder = Path(path).parent.resolve()
+    for specimen in exp.specimens:
+        for m in specimen.measurements:
+            if m.source_path is not None and m.source_path.parent.resolve() == folder:
+                raise ProjectError(f"the folder holds original recordings; save {what} in another folder")
 
 
 def save_experiment(exp: Experiment, path: str | Path) -> Path:
@@ -45,13 +60,7 @@ def save_experiment(exp: Experiment, path: str | Path) -> Path:
     if not path.name.endswith(SUFFIX):
         stem = path.name[: -len(".json")] if path.name.endswith(".json") else path.name
         path = path.with_name(stem + SUFFIX)
-    folder = path.parent.resolve()
-    for specimen in exp.specimens:
-        for m in specimen.measurements:
-            if m.source_path is not None and m.source_path.parent.resolve() == folder:
-                raise ProjectError(
-                    "the folder holds original recordings; save the experiment in another folder"
-                )
+    check_not_recordings_folder(exp, path)
     data = {
         "schema": SCHEMA,
         "software": f"Latos V2 {__version__}",
@@ -93,6 +102,8 @@ def load_experiment(path: str | Path) -> Experiment:
                 for s in e["specimens"]
             ],
             optimization=OptimizationSettings(**optimization) if optimization is not None else None,
+            # Absent from files written before predictions could be frozen.
+            predictions=[Prediction(**p) for p in e.get("predictions", [])],
         )
     except (KeyError, TypeError) as exc:
         raise ProjectError(f"{path.name} is damaged: {exc}") from exc

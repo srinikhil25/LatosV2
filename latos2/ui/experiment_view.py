@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 from latos2 import experiment as ex
+from latos2 import predictions as preds
 from latos2.export import analysis_record
 from latos2.hioki_reader import file_sha256
 from latos2.project_io import SUFFIX, ProjectError, load_experiment, save_experiment
@@ -691,6 +692,18 @@ class ExperimentView(QWidget):
         self.selected_id = specimen.id
         self._changed(rebuild_form=True)
         return measurement
+
+    def link_prediction(self, specimen_id: str, prediction_id: str | None) -> None:
+        """Record which frozen prediction a specimen tests; None removes the link.
+
+        Raises ValueError when the link is not allowed.
+        """
+        specimen = self.experiment.specimen(specimen_id)
+        if prediction_id == specimen.prediction:
+            return
+        preds.link(self.experiment, specimen, prediction_id)
+        self.form_message.hide()
+        self._changed()
 
     def make_primary(self, measurement_id: str) -> None:
         specimen = self._owner(measurement_id)
@@ -1354,6 +1367,22 @@ class ExperimentView(QWidget):
         form.addRow("ID", self.id_edit)
         form.addRow("Label", self.label_edit)
         form.addRow("Notes", self.notes_edit)
+        self.prediction_combo = QComboBox()
+        self.prediction_combo.setToolTip(
+            "The frozen prediction this specimen was prepared to test (Optimization ▸ Predictions)"
+        )
+        self.prediction_combo.addItem("None", None)
+        for p in exp.predictions:
+            if not p.withdrawn_at and preds.intact(p):
+                frozen = p.frozen_at[:16].replace("T", " ")
+                self.prediction_combo.addItem(f"{p.id}: {preds.describe(p)} (frozen {frozen})", p.id)
+        if s.prediction and self.prediction_combo.findData(s.prediction) < 0:
+            p = exp.prediction(s.prediction)
+            why = "missing" if p is None else ("withdrawn" if p.withdrawn_at else "altered")
+            self.prediction_combo.addItem(f"{s.prediction} ({why})", s.prediction)
+        self.prediction_combo.setCurrentIndex(max(0, self.prediction_combo.findData(s.prediction)))
+        self.prediction_combo.currentIndexChanged.connect(self._on_prediction)
+        form.addRow("Tests prediction", self.prediction_combo)
         layout.addLayout(form)
 
         components = self.components()
@@ -1570,6 +1599,18 @@ class ExperimentView(QWidget):
         if s is not None:
             s.pure_component = self.type_combo.currentData()
             self._changed()
+
+    def _on_prediction(self) -> None:
+        s = self._selected()
+        if s is None or self._building:
+            return
+        try:
+            self.link_prediction(s.id, self.prediction_combo.currentData())
+        except ValueError as exc:
+            self._form_error(str(exc)[:1].upper() + str(exc)[1:] + ".")
+            self.prediction_combo.blockSignals(True)
+            self.prediction_combo.setCurrentIndex(max(0, self.prediction_combo.findData(s.prediction)))
+            self.prediction_combo.blockSignals(False)
 
     def _on_mass(self, component: str) -> None:
         s = self._selected()

@@ -42,6 +42,7 @@ __all__ = [
     "Mixture",
     "OptimizationSettings",
     "OutputDefinition",
+    "Prediction",
     "Specimen",
     "attach",
     "check_sources",
@@ -200,6 +201,8 @@ class Specimen:
             for categorical inputs.
         notes: Free text.
         measurements: Its measurement sessions.
+        prediction: ID of the frozen prediction this specimen was prepared to
+            test, or None.
     """
 
     id: str
@@ -209,6 +212,7 @@ class Specimen:
     inputs: dict[str, float | str] = field(default_factory=dict)
     notes: str = ""
     measurements: list[Measurement] = field(default_factory=list)
+    prediction: str | None = None
 
 
 @dataclass
@@ -246,6 +250,63 @@ class OptimizationSettings:
 
 
 @dataclass
+class Prediction:
+    """A recommendation frozen before its specimen was prepared and measured.
+
+    Everything up to `sha256` is fixed when the prediction is frozen and is
+    covered by that digest; only the withdrawal fields may be set afterwards.
+    See `latos2.predictions`.
+
+    Attributes:
+        id: ``P1``, ``P2``, … in the order frozen.
+        frozen_at: Local time of freezing, ISO 8601 with its UTC offset.
+        output: Name of the predicted output, as it was when frozen.
+        unit: Its unit.
+        objective: ``maximize``, ``minimize`` or ``target``.
+        target: The target value, for a ``target`` objective.
+        fractions: Mass fraction of every mixture component, or None.
+        inputs: Value of every other optimization input.
+        predicted_mean: The model's predicted mean response.
+        latent_sd: The model SD of that mean.
+        predictive_sd: The SD for a new specimen's measurement: the model SD
+            with the additional noise and the median measured SEM.
+        interval_95: ``predicted_mean ± 1.96 · predictive_sd``: the interval a
+            new measurement is scored against.
+        best_before: For maximize and minimize, the best measured response in
+            the fit; for a target, the smallest distance of a measured
+            response from it.
+        best_before_specimen: The specimen that gave `best_before`.
+        preparation: Masses to weigh, when a total mass was entered.
+        record: The full model record of the recommendation.
+        note: The researcher's note at freezing.
+        sha256: Digest of all the fields above, taken at freezing.
+        withdrawn_at: Local time of withdrawal, or None.
+        withdrawn_reason: Why it was withdrawn.
+    """
+
+    id: str
+    frozen_at: str
+    output: str
+    unit: str
+    objective: str
+    target: float | None
+    fractions: dict[str, float] | None
+    inputs: dict[str, float]
+    predicted_mean: float
+    latent_sd: float
+    predictive_sd: float
+    interval_95: list[float]
+    best_before: float | None
+    best_before_specimen: str | None
+    preparation: dict | None
+    record: dict
+    note: str = ""
+    sha256: str = ""
+    withdrawn_at: str | None = None
+    withdrawn_reason: str = ""
+
+
+@dataclass
 class Experiment:
     """An optimization problem and the observations made for it."""
 
@@ -256,9 +317,13 @@ class Experiment:
     outputs: list[OutputDefinition] = field(default_factory=list)
     specimens: list[Specimen] = field(default_factory=list)
     optimization: OptimizationSettings | None = None
+    predictions: list[Prediction] = field(default_factory=list)
 
     def output(self, name: str) -> OutputDefinition | None:
         return next((o for o in self.outputs if o.name == name), None)
+
+    def prediction(self, prediction_id: str) -> Prediction | None:
+        return next((p for p in self.predictions if p.id == prediction_id), None)
 
     def specimen(self, specimen_id: str) -> Specimen:
         for specimen in self.specimens:
@@ -559,16 +624,40 @@ def specimen_messages(
     for m in specimen.measurements:
         if exp.output(m.output) is None:
             warn(f"Session '{m.label}' belongs to output '{m.output}', which is no longer defined")
+
+    if specimen.prediction:
+        p = exp.prediction(specimen.prediction)
+        if p is None:
+            warn(f"Tests prediction {specimen.prediction}, which does not exist in this experiment")
+        elif p.withdrawn_at:
+            warn(f"Tests prediction {p.id}, which was withdrawn: {p.withdrawn_reason}")
+        else:
+            note(f"Prospective test of frozen prediction {p.id} ({p.output})")
     return out
 
 
 # -- definition edits that keep specimens consistent --------------------------
 
 
+def _frozen_reference(exp: Experiment, kind: str, name: str) -> None:
+    """Refuse to rename something a frozen prediction refers to by name."""
+    for p in exp.predictions:
+        names = {
+            "component": set(p.fractions or {}),
+            "input": set(p.inputs),
+            "output": {p.output},
+        }[kind]
+        if name in names:
+            raise ValueError(
+                f"frozen prediction {p.id} refers to the {kind} {name!r} by this name; it cannot be renamed"
+            )
+
+
 def rename_component(exp: Experiment, old: str, new: str) -> None:
     mixture = exp.mixture
     if mixture is None or old == new:
         return
+    _frozen_reference(exp, "component", old)
     if new in mixture.components:
         raise ValueError(f"a component named {new!r} already exists")
     mixture.components[mixture.components.index(old)] = new
@@ -592,6 +681,7 @@ def remove_component(exp: Experiment, name: str) -> None:
 def rename_input(exp: Experiment, old: str, new: str) -> None:
     if old == new:
         return
+    _frozen_reference(exp, "input", old)
     if any(v.name == new for v in exp.inputs):
         raise ValueError(f"an input named {new!r} already exists")
     next(v for v in exp.inputs if v.name == old).name = new
@@ -609,6 +699,7 @@ def remove_input(exp: Experiment, name: str) -> None:
 def rename_output(exp: Experiment, old: str, new: str) -> None:
     if old == new:
         return
+    _frozen_reference(exp, "output", old)
     if exp.output(new) is not None:
         raise ValueError(f"an output named {new!r} already exists")
     exp.output(old).name = new

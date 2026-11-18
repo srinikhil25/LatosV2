@@ -27,9 +27,10 @@ of input variables.
 **Current status:** Milestone 1 (HIOKI Measurement Analyzer) and Milestone 2
 (experiment definition and observation management) are complete. Milestone 3
 (Gaussian-process modeling and Bayesian optimization) is implemented and awaiting
-researcher review; it produces provisional recommendations only. Recommendation
-freezing, prospective validation and other instrument modules are planned and not
-yet available. Latos V2 is a research prototype, not a validated general-purpose
+researcher review; it produces provisional recommendations. Milestone 4 (frozen predictions, prospective scoring and the
+preparation sheet) is implemented and awaiting researcher review; no prospective
+test has been measured yet. Other instrument modules are planned and not yet
+available. Latos V2 is a research prototype, not a validated general-purpose
 optimization product.
 
 ## Applications
@@ -120,6 +121,39 @@ total mass. Constraints that relate several inputs are not yet supported.
 The optimization settings are saved in the experiment file. The fitted model is
 not saved; refitting with the same data, settings and seed reproduces it.
 
+### Frozen predictions and prospective tests (M4)
+
+- **Freeze:** after a fit, **Freeze prediction…** fixes the recommendation as P1,
+  P2, … before the specimen is prepared: the condition, the predicted mean and
+  model SD, the SD and 95 % interval for a new measurement, the best response
+  measured so far, the masses to weigh (when a total is entered) and the full
+  model record. The experiment file is saved at once. The same recommendation
+  cannot be frozen twice.
+- **Never edited, never deleted:** a frozen prediction stores a SHA-256 digest of
+  its content; one edited outside Latos is shown as *Altered outside Latos*. While
+  no specimen tests it, it can be withdrawn with a reason; it stays in the
+  experiment, shown as withdrawn. Inputs, outputs and components a frozen
+  prediction refers to cannot be renamed.
+- **Preparation sheet:** **Export preparation sheet…** writes a one-page PDF with
+  the composition (fractions and wt %), the masses to weigh, the prediction, blank
+  lines for the actual masses, dates and operator, and the steps back into Latos.
+- **Link:** in the Experiment specimen form, **Tests prediction** records which
+  prediction a new specimen was prepared to test. A specimen that was in the
+  prediction's own fit cannot test it.
+- **Score** (Optimization ▸ Predictions): the specimen's primary measurement
+  against the frozen values only: error, z = error / frozen predictive SD,
+  whether it lies inside the frozen 95 % interval, the gain over the best response
+  measured before freezing, and how far the specimen's actual composition and
+  inputs lie from the frozen condition (reported, not corrected for). The interval
+  is not recomputed with the new specimen's SEM.
+- **Prospective check:** the recording's first time stamp is compared with the
+  time of freezing: *after the freeze*, *before the freeze*, or *not confirmed*.
+  HIOKI dates such as 12/1/2026 can be read as month/day or day/month; when the
+  two readings disagree, Latos does not choose. Values entered by hand have no
+  recording time.
+- A single test is reported as one test: it neither validates nor refutes the
+  model. Linked specimens enter the next fit like any other observation.
+
 ## Getting started
 
 On Windows, from the Latos V2 project directory with the project's virtual
@@ -137,6 +171,10 @@ environment and dependencies installed:
    shown in the analyzer to a specimen.
 3. In **Optimization**, choose the output, goal and search domain, then use
    **Fit model and recommend**. Enter a total mass to obtain the masses to weigh.
+4. To test the recommendation, use **Freeze prediction…** before preparing the
+   specimen, and export its preparation sheet from **Predictions**. After
+   measuring, add the specimen in **Experiment**, attach its recording and set
+   **Tests prediction**; **Predictions** then shows the score.
 
 For dependency details, see `pyproject.toml`. Latos is not yet packaged as a
 standalone installer.
@@ -198,6 +236,10 @@ interval. This candidate has not been prepared or measured.
   silently recalculated.
 - Results export as per-cycle and summary CSV files, provenance JSON, and figures
   in PNG (300 dpi) and SVG.
+- Frozen predictions are stored in the experiment file with a SHA-256 digest of
+  their content; a prediction altered outside Latos is reported and no
+  preparation sheet is written from it. Preparation sheets, like experiment
+  files, are never written into the folder that holds the original recordings.
 
 ## Development roadmap
 
@@ -206,7 +248,7 @@ interval. This candidate has not been prepared or measured.
 | M1 | HIOKI measurement analysis and scientific desktop UI | **Complete** |
 | M2 | Researcher-defined experiments, mixtures, specimen/measurement relationships, observation management | **Complete** |
 | M3 | Gaussian-process modeling, uncertainty display and Bayesian acquisition | **Implemented**, awaiting review |
-| M4 | Laboratory-ready next-experiment instructions, frozen predictions and prospective scoring | Planned |
+| M4 | Laboratory-ready next-experiment instructions, frozen predictions and prospective scoring | **Implemented**, awaiting review |
 | M5 | MXene instrument analysis and evidence-linked multitechnique comparisons | Planned |
 
 Each milestone is scoped to a usable scientific deliverable. A milestone is
